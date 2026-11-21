@@ -3,8 +3,10 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Net.Http;
 using System.Text.Encodings.Web;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
@@ -12,6 +14,7 @@ using SecondBrain.Core.Model;
 using SecondBrain.Core.Ports;
 using SecondBrain.Infrastructure.Capture;
 using SecondBrain.Infrastructure.Indexing;
+using SecondBrain.Infrastructure.Ollama;
 using SecondBrain.Infrastructure.Vault;
 
 namespace SecondBrain.Cli;
@@ -27,6 +30,17 @@ public sealed partial class CliApp(TextWriter stdout, TextWriter stderr, TimePro
     private readonly TextWriter _stdout = stdout ?? throw new ArgumentNullException(nameof(stdout));
     private readonly TextWriter _stderr = stderr ?? throw new ArgumentNullException(nameof(stderr));
     private readonly TimeProvider _timeProvider = timeProvider ?? TimeProvider.System;
+    private readonly HttpMessageHandler? _ollamaHandler;
+
+    public CliApp(
+        TextWriter stdout,
+        TextWriter stderr,
+        TimeProvider? timeProvider,
+        HttpMessageHandler? ollamaHandler)
+        : this(stdout, stderr, timeProvider)
+    {
+        _ollamaHandler = ollamaHandler;
+    }
 
     [GeneratedRegex(@"(?<=^|\s)\^e-[A-Za-z0-9-]+(?=$|\s)", RegexOptions.CultureInvariant)]
     private static partial Regex DiaryAnchorRegex();
@@ -126,6 +140,7 @@ public sealed partial class CliApp(TextWriter stdout, TextWriter stderr, TimePro
         bool helpRequested,
         CancellationToken ct)
     {
+        var live = false;
         var endOfOptions = false;
         for (var i = startIndex; i < args.Length; i++)
         {
@@ -150,6 +165,12 @@ public sealed partial class CliApp(TextWriter stdout, TextWriter stderr, TimePro
                     return 1;
                 }
 
+                continue;
+            }
+
+            if (!endOfOptions && arg == "--live")
+            {
+                live = true;
                 continue;
             }
 
@@ -189,15 +210,109 @@ public sealed partial class CliApp(TextWriter stdout, TextWriter stderr, TimePro
         var notesCount = entries.Count(static e => e.Path.EndsWith(".md", StringComparison.OrdinalIgnoreCase));
         var stats = await index.GetStatsAsync(ct).ConfigureAwait(false);
 
+        if (!live)
+        {
+            if (json)
+            {
+                await WriteJsonAsync(
+                    new DoctorOutput(
+                        VaultPath: fullVaultPath,
+                        NotesCount: notesCount,
+                        Chunks: stats.Chunks,
+                        Vectors: stats.Vectors,
+                        EmbeddingModel: stats.EmbeddingModel),
+                    ct).ConfigureAwait(false);
+            }
+            else
+            {
+                await _stdout.WriteLineAsync($"VaultPath: {fullVaultPath}".AsMemory(), ct).ConfigureAwait(false);
+                await _stdout.WriteLineAsync($"NotesCount: {notesCount.ToString(CultureInfo.InvariantCulture)}".AsMemory(), ct).ConfigureAwait(false);
+                await _stdout.WriteLineAsync($"Chunks: {stats.Chunks.ToString(CultureInfo.InvariantCulture)}".AsMemory(), ct).ConfigureAwait(false);
+                await _stdout.WriteLineAsync($"Vectors: {stats.Vectors.ToString(CultureInfo.InvariantCulture)}".AsMemory(), ct).ConfigureAwait(false);
+                await _stdout.WriteLineAsync($"EmbeddingModel: {stats.EmbeddingModel}".AsMemory(), ct).ConfigureAwait(false);
+            }
+
+            return 0;
+        }
+
+        var ollamaBaseUrl = Environment.GetEnvironmentVariable("SECONDBRAIN_OLLAMA_URL");
+        var ollamaOptions = string.IsNullOrWhiteSpace(ollamaBaseUrl)
+            ? new OllamaOptions()
+            : new OllamaOptions(BaseUrl: ollamaBaseUrl);
+
+        using var httpClient = _ollamaHandler is not null
+            ? new HttpClient(_ollamaHandler, disposeHandler: false)
+            : new HttpClient();
+        httpClient.Timeout = TimeSpan.FromSeconds(120);
+
+        var embeddingClient = new OllamaEmbeddingClient(httpClient, ollamaOptions);
+        var chatRouter = new OllamaChatRouter(httpClient, ollamaOptions);
+
+        float[] queryVector;
+        DoctorPingResult? pingResult;
+        try
+        {
+            queryVector = await embeddingClient.EmbedQueryAsync("тест secondbrain", ct).ConfigureAwait(false);
+
+            const string pingSchema = """
+                {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string"
+                    }
+                  },
+                  "required": ["status"],
+                  "additionalProperties": false
+                }
+                """;
+
+            pingResult = await chatRouter
+                .Resolve("extract")
+                .ExtractAsync<DoctorPingResult>(
+                    systemPrompt: "You are a health-check responder. Reply strictly with valid JSON matching the schema and set status to \"ok\".",
+                    userPrompt: "Health check ping. Return {\"status\":\"ok\"}.",
+                    jsonSchema: pingSchema,
+                    ct: ct)
+                .ConfigureAwait(false);
+
+            if (pingResult is null || string.IsNullOrWhiteSpace(pingResult.Status))
+            {
+                throw new InvalidOperationException("Ollama chat health check returned an invalid or empty DoctorPingResult payload.");
+            }
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex) when (ex is HttpRequestException or InvalidOperationException or TimeoutException or TaskCanceledException or JsonException)
+        {
+            await _stderr.WriteLineAsync($"Ollama live check failed: {ex.Message}".AsMemory(), ct).ConfigureAwait(false);
+            return 1;
+        }
+
+        var sumSquares = 0.0;
+        for (var i = 0; i < queryVector.Length; i++)
+        {
+            sumSquares += (double)queryVector[i] * queryVector[i];
+        }
+
+        var norm = Math.Sqrt(sumSquares);
+        var normalized = Math.Abs(norm - 1.0) <= 1e-3;
+
         if (json)
         {
             await WriteJsonAsync(
-                new DoctorOutput(
+                new DoctorLiveOutput(
                     VaultPath: fullVaultPath,
                     NotesCount: notesCount,
                     Chunks: stats.Chunks,
                     Vectors: stats.Vectors,
-                    EmbeddingModel: stats.EmbeddingModel),
+                    EmbeddingModel: stats.EmbeddingModel,
+                    OllamaChat: "OK",
+                    EmbedModel: embeddingClient.ModelId,
+                    EmbedDims: queryVector.Length,
+                    Normalized: normalized),
                 ct).ConfigureAwait(false);
         }
         else
@@ -207,6 +322,10 @@ public sealed partial class CliApp(TextWriter stdout, TextWriter stderr, TimePro
             await _stdout.WriteLineAsync($"Chunks: {stats.Chunks.ToString(CultureInfo.InvariantCulture)}".AsMemory(), ct).ConfigureAwait(false);
             await _stdout.WriteLineAsync($"Vectors: {stats.Vectors.ToString(CultureInfo.InvariantCulture)}".AsMemory(), ct).ConfigureAwait(false);
             await _stdout.WriteLineAsync($"EmbeddingModel: {stats.EmbeddingModel}".AsMemory(), ct).ConfigureAwait(false);
+            await _stdout.WriteLineAsync("OllamaChat: OK".AsMemory(), ct).ConfigureAwait(false);
+            await _stdout.WriteLineAsync($"EmbedModel: {embeddingClient.ModelId}".AsMemory(), ct).ConfigureAwait(false);
+            await _stdout.WriteLineAsync($"EmbedDims: {queryVector.Length.ToString(CultureInfo.InvariantCulture)}".AsMemory(), ct).ConfigureAwait(false);
+            await _stdout.WriteLineAsync($"Normalized: {(normalized ? "true" : "false")}".AsMemory(), ct).ConfigureAwait(false);
         }
 
         return 0;
@@ -918,7 +1037,7 @@ public sealed partial class CliApp(TextWriter stdout, TextWriter stderr, TimePro
 
             Commands:
               help                          Show this help message
-              doctor                        Validate vault directory and show index stats
+              doctor                        Validate vault directory and show index stats (--live)
               capture <text...>             Capture a note (--title <t>, --apply, --dry-run)
               diary [<text...>]             Append diary entry (--stats, --dry-run, --apply)
               search <query...>             Search notes (--limit <n>, --tags <csv>, --type <NoteType>, --prefix <path>)
@@ -1063,6 +1182,20 @@ public sealed partial class CliApp(TextWriter stdout, TextWriter stderr, TimePro
         int Chunks,
         int Vectors,
         string EmbeddingModel);
+
+    private sealed record DoctorLiveOutput(
+        string VaultPath,
+        int NotesCount,
+        int Chunks,
+        int Vectors,
+        string EmbeddingModel,
+        string OllamaChat,
+        string EmbedModel,
+        int EmbedDims,
+        bool Normalized);
+
+    private sealed record DoctorPingResult(
+        [property: JsonPropertyName("status")] string Status);
 
     private sealed record CaptureOutput(
         string Mode,
