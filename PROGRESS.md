@@ -11,4 +11,8 @@
 - [x] Configure `Directory.Packages.props` (CPM)
 - [x] Configure `global.json`
 - [x] Add `NoteMetadata.cs` and related records to `src/SecondBrain.Core/Model/NoteMetadata.cs`
-- [x] Pass Gate: `dotnet build -warnaserror && dotnet test`
+- [x] Pass Gate: `dotnet build SecondBrain.slnx -warnaserror; dotnet test SecondBrain.slnx --no-build --verbosity normal`
+
+## Milestone T1
+- [x] T0: Scaffold solution & core setup (`DONE`)
+- [x] T1 (P1): Core contracts & initial setup verified (`DONE`)
