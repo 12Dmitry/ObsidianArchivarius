@@ -10,8 +10,17 @@ public static class AtomicWriter
 
     public static async Task WriteAllTextAtomicAsync(string fullPath, string content, CancellationToken ct = default)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(fullPath);
         ArgumentNullException.ThrowIfNull(content);
+        var bytes = Utf8NoBom.GetBytes(content);
+        await WriteAllBytesAtomicAsync(fullPath, bytes, ct).ConfigureAwait(false);
+    }
+
+    public static async Task WriteAllBytesAtomicAsync(
+        string fullPath,
+        ReadOnlyMemory<byte> bytes,
+        CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(fullPath);
         ct.ThrowIfCancellationRequested();
 
         var directory = Path.GetDirectoryName(fullPath);
@@ -24,8 +33,6 @@ public static class AtomicWriter
 
         try
         {
-            var bytes = Utf8NoBom.GetBytes(content);
-
             await using (var stream = new FileStream(
                 tempPath,
                 FileMode.CreateNew,

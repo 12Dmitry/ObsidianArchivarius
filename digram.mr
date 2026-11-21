@@ -1,0 +1,33 @@
+﻿flowchart LR
+    subgraph DONE["ГОТОВО (T0 - P3): Безопасное ядро и хранилище"]
+        CORE["SecondBrain.Core<br/>Замороженные контракты"]
+        P2["P2: Slugger +<br/>FrontmatterCodec"]
+        P3["P3: ManagedBlock + AtomicWriter +<br/>VaultStore + Journal/Rollback"]
+        CORE --> P2 --> P3
+    end
+
+    subgraph MVP["СЛЕДУЮЩИЙ ЭТАП (P4): Рабочий локальный CLI (0 LLM)"]
+        T4A["T4a [KIMI]<br/>RuNormalizer + RuStemmer + Chunker"]
+        T4B["T4b [HEAVY]<br/>SqliteVaultIndex (FTS5 trigram)"]
+        T4C["T4c [LITE]<br/>DirectiveParser + CLI<br/>doctor/capture/diary/search/show"]
+        T4A --> T4B --> T4C
+    end
+
+    subgraph QUALITY["КАЧЕСТВО И LLM (P5 - P8)"]
+        P5["P5: Ollama T-lite + bge-m3 +<br/>Cassettes (Replay)"]
+        P6["P6': Gold (20+) + LinkEvalRunner +<br/>Абляция + Threshold Sweep"]
+        P7["P7: EmbeddingQueue + vec0/RRF +<br/>TagResolver + Relaxation"]
+        P8["P8: InsightHandler +<br/>Closed-World Linking"]
+        P5 --> P6 --> P7 --> P8
+    end
+
+    P9["CUT-LINE: P9 Decision / Maps / Inbox"]
+
+    P3 --> T4B
+    T4C -->|"Можно копить 30-50 заметок"| P5
+    P8 -.->|"Если остаётся время"| P9
+
+    style DONE fill:#163020,stroke:#4ade80,color:#ecfdf5
+    style MVP fill:#1e293b,stroke:#38bdf8,color:#f0f9ff
+    style QUALITY fill:#2e1f14,stroke:#f59e0b,color:#fffbeb
+    style P9 fill:#27272a,stroke:#71717a,color:#d4d4d8
