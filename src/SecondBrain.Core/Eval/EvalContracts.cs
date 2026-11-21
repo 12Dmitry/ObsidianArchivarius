@@ -1,9 +1,4 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Threading;
-using System.Threading.Tasks;
-
-namespace SecondBrain.Core.Eval;
+﻿namespace SecondBrain.Core.Eval;
 
 public sealed record EvalCase(string Id, string Input, string RecipeId, GoldExpectation Gold);
 

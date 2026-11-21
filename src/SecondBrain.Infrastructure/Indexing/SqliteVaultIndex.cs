@@ -1,8 +1,14 @@
-﻿using System.Diagnostics;
+﻿using System;
+using System.Collections.Generic;
+using System.Diagnostics;
 using System.Globalization;
+using System.IO;
+using System.Linq;
 using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
+using System.Threading;
+using System.Threading.Tasks;
 using Microsoft.Data.Sqlite;
 using SecondBrain.Core.Linking;
 using SecondBrain.Core.Model;
@@ -14,6 +20,9 @@ namespace SecondBrain.Infrastructure.Indexing;
 public sealed class SqliteVaultIndex : IVaultIndex, IDisposable
 {
     private const string BuiltAtMetaKey = "built_at";
+    private const string EmbeddingModelMetaKey = "embedding_model";
+    private const string DimensionsMetaKey = "dimensions";
+    private const int RrfConstantK = 60;
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -24,16 +33,19 @@ public sealed class SqliteVaultIndex : IVaultIndex, IDisposable
     private readonly TimeProvider _timeProvider;
     private readonly string _dbPath;
     private readonly string _connectionString;
+    private readonly IEmbeddingClient? _embeddingClient;
     private readonly SemaphoreSlim _writeLock = new(1, 1);
 
     private volatile bool _initialized;
+    private volatile bool _vec0Available;
     private bool _disposed;
 
     public SqliteVaultIndex(
         string vaultRoot,
         IVaultStore vaultStore,
         TimeProvider? timeProvider = null,
-        string? dbPath = null)
+        string? dbPath = null,
+        IEmbeddingClient? embeddingClient = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(vaultRoot);
         ArgumentNullException.ThrowIfNull(vaultStore);
@@ -44,6 +56,7 @@ public sealed class SqliteVaultIndex : IVaultIndex, IDisposable
         _dbPath = string.IsNullOrWhiteSpace(dbPath)
             ? Path.Combine(fullVaultRoot, ".brain", "index.db")
             : Path.GetFullPath(dbPath);
+        _embeddingClient = embeddingClient;
 
         _connectionString = new SqliteConnectionStringBuilder
         {
@@ -76,7 +89,7 @@ public sealed class SqliteVaultIndex : IVaultIndex, IDisposable
                 Directory.CreateDirectory(directory);
             }
 
-            await using var connection = await OpenConnectionAsync(ct).ConfigureAwait(false);
+            await using var connection = await OpenConnectionAsync(loadVec0: false, ct).ConfigureAwait(false);
             await using var cmd = connection.CreateCommand();
             cmd.CommandText = """
                 CREATE TABLE IF NOT EXISTS notes (
@@ -111,6 +124,14 @@ public sealed class SqliteVaultIndex : IVaultIndex, IDisposable
                     tokenize='trigram'
                 );
 
+                CREATE TABLE IF NOT EXISTS chunk_vectors (
+                    chunk_id TEXT PRIMARY KEY,
+                    embedding BLOB NOT NULL,
+                    model TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY(chunk_id) REFERENCES chunks(chunk_id) ON DELETE CASCADE
+                );
+
                 CREATE TABLE IF NOT EXISTS edges (
                     src_path TEXT NOT NULL,
                     dst_path TEXT NOT NULL,
@@ -140,6 +161,26 @@ public sealed class SqliteVaultIndex : IVaultIndex, IDisposable
                 """;
             await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
 
+            try
+            {
+                connection.EnableExtensions(true);
+                connection.LoadExtension("vec0", "sqlite3_vec_init");
+                int dims = _embeddingClient is { Dimensions: > 0 } client ? client.Dimensions : 1024;
+                await using var vecCmd = connection.CreateCommand();
+                vecCmd.CommandText = $"""
+                    CREATE VIRTUAL TABLE IF NOT EXISTS vec_chunks USING vec0(
+                        chunk_id TEXT PRIMARY KEY,
+                        embedding float[{dims}] distance_metric=cosine
+                    );
+                    """;
+                await vecCmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+                _vec0Available = true;
+            }
+            catch (Exception)
+            {
+                _vec0Available = false;
+            }
+
             _initialized = true;
         }
         finally
@@ -158,11 +199,11 @@ public sealed class SqliteVaultIndex : IVaultIndex, IDisposable
         await _writeLock.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            await using var connection = await OpenConnectionAsync(ct).ConfigureAwait(false);
+            await using var connection = await OpenConnectionAsync(_vec0Available, ct).ConfigureAwait(false);
             await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(ct).ConfigureAwait(false);
 
             var nowIso = _timeProvider.GetUtcNow().ToString("O", CultureInfo.InvariantCulture);
-            await UpsertNoteCoreAsync(connection, transaction, doc, nowIso, ct).ConfigureAwait(false);
+            await UpsertNoteCoreAsync(connection, transaction, doc, nowIso, _vec0Available, ct).ConfigureAwait(false);
 
             await transaction.CommitAsync(ct).ConfigureAwait(false);
         }
@@ -183,10 +224,10 @@ public sealed class SqliteVaultIndex : IVaultIndex, IDisposable
         await _writeLock.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            await using var connection = await OpenConnectionAsync(ct).ConfigureAwait(false);
+            await using var connection = await OpenConnectionAsync(_vec0Available, ct).ConfigureAwait(false);
             await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(ct).ConfigureAwait(false);
 
-            await DeleteNoteCoreAsync(connection, transaction, normalizedPath, ct).ConfigureAwait(false);
+            await DeleteNoteCoreAsync(connection, transaction, normalizedPath, _vec0Available, ct).ConfigureAwait(false);
 
             await transaction.CommitAsync(ct).ConfigureAwait(false);
         }
@@ -240,7 +281,7 @@ public sealed class SqliteVaultIndex : IVaultIndex, IDisposable
             var builtAt = _timeProvider.GetUtcNow();
             var builtAtIso = builtAt.ToString("O", CultureInfo.InvariantCulture);
 
-            await using var connection = await OpenConnectionAsync(ct).ConfigureAwait(false);
+            await using var connection = await OpenConnectionAsync(_vec0Available, ct).ConfigureAwait(false);
             await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(ct).ConfigureAwait(false);
 
             var existingPaths = new List<string>();
@@ -259,14 +300,14 @@ public sealed class SqliteVaultIndex : IVaultIndex, IDisposable
             {
                 if (!activePaths.Contains(existingPath))
                 {
-                    await DeleteNoteCoreAsync(connection, transaction, existingPath, ct).ConfigureAwait(false);
+                    await DeleteNoteCoreAsync(connection, transaction, existingPath, _vec0Available, ct).ConfigureAwait(false);
                 }
             }
 
             foreach (var doc in docs)
             {
                 ct.ThrowIfCancellationRequested();
-                await UpsertNoteCoreAsync(connection, transaction, doc, builtAtIso, ct).ConfigureAwait(false);
+                await UpsertNoteCoreAsync(connection, transaction, doc, builtAtIso, _vec0Available, ct).ConfigureAwait(false);
             }
 
             await using (var metaCmd = connection.CreateCommand())
@@ -281,16 +322,18 @@ public sealed class SqliteVaultIndex : IVaultIndex, IDisposable
                 await metaCmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
             }
 
-            var chunkCount = await CountChunksAsync(connection, transaction, ct).ConfigureAwait(false);
+            int chunkCount = await CountRowsAsync(connection, transaction, "chunks", ct).ConfigureAwait(false);
+            int vectorCount = await CountRowsAsync(connection, transaction, "chunk_vectors", ct).ConfigureAwait(false);
+            (string model, int dimensions) = await ReadEmbeddingMetaAsync(connection, transaction, ct).ConfigureAwait(false);
 
             await transaction.CommitAsync(ct).ConfigureAwait(false);
 
             return new IndexStats(
                 Chunks: chunkCount,
-                Vectors: 0,
+                Vectors: vectorCount,
                 BuiltAt: builtAt,
-                EmbeddingModel: "none",
-                Dimensions: 0);
+                EmbeddingModel: model,
+                Dimensions: dimensions);
         }
         finally
         {
@@ -304,15 +347,17 @@ public sealed class SqliteVaultIndex : IVaultIndex, IDisposable
 
         await EnsureInitializedAsync(ct).ConfigureAwait(false);
 
-        await using var connection = await OpenConnectionAsync(ct).ConfigureAwait(false);
-        var chunkCount = await CountChunksAsync(connection, transaction: null, ct).ConfigureAwait(false);
+        await using var connection = await OpenConnectionAsync(loadVec0: false, ct).ConfigureAwait(false);
+        int chunkCount = await CountRowsAsync(connection, transaction: null, "chunks", ct).ConfigureAwait(false);
+        int vectorCount = await CountRowsAsync(connection, transaction: null, "chunk_vectors", ct).ConfigureAwait(false);
+        (string embeddingModel, int dimensions) = await ReadEmbeddingMetaAsync(connection, transaction: null, ct).ConfigureAwait(false);
 
         var builtAt = DateTimeOffset.MinValue;
         await using (var metaCmd = connection.CreateCommand())
         {
             metaCmd.CommandText = "SELECT value FROM index_meta WHERE key = @key;";
             metaCmd.Parameters.AddWithValue("@key", BuiltAtMetaKey);
-            var scalar = await metaCmd.ExecuteScalarAsync(ct).ConfigureAwait(false);
+            object? scalar = await metaCmd.ExecuteScalarAsync(ct).ConfigureAwait(false);
             if (scalar is string builtAtStr &&
                 DateTimeOffset.TryParse(
                     builtAtStr,
@@ -326,13 +371,32 @@ public sealed class SqliteVaultIndex : IVaultIndex, IDisposable
 
         return new IndexStats(
             Chunks: chunkCount,
-            Vectors: 0,
+            Vectors: vectorCount,
             BuiltAt: builtAt,
-            EmbeddingModel: "none",
-            Dimensions: 0);
+            EmbeddingModel: embeddingModel,
+            Dimensions: dimensions);
     }
 
     public async Task<SearchResult> SearchAsync(SearchQuery query, CancellationToken ct = default)
+    {
+        (SearchResult result, _) = await SearchDetailedAsync(
+            query,
+            filters: null,
+            useLexical: true,
+            useVector: _embeddingClient is not null,
+            useGraph: false,
+            ct: ct).ConfigureAwait(false);
+
+        return result;
+    }
+
+    public async Task<(SearchResult Result, SearchExplain Explain)> SearchDetailedAsync(
+        SearchQuery query,
+        SearchFilters? filters = null,
+        bool useLexical = true,
+        bool useVector = true,
+        bool useGraph = false,
+        CancellationToken ct = default)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         ArgumentNullException.ThrowIfNull(query);
@@ -340,241 +404,635 @@ public sealed class SqliteVaultIndex : IVaultIndex, IDisposable
         var totalSw = Stopwatch.StartNew();
         await EnsureInitializedAsync(ct).ConfigureAwait(false);
 
-        var lexicalSw = Stopwatch.StartNew();
+        int limit = query.Limit > 0 ? query.Limit : 8;
+        int candidateLimit = Math.Max(limit * 20, 500);
 
-        var limit = query.Limit > 0 ? query.Limit : 8;
-        var tokens = RuNormalizer.TokenizeNormalized(query.Text)
+        List<string> tokens = RuNormalizer.TokenizeNormalized(query.Text)
             .Distinct(StringComparer.Ordinal)
             .ToList();
-        var longTokens = tokens.Where(static t => t.Length >= 3).ToList();
+        List<string> longTokens = tokens.Where(static t => t.Length >= 3).ToList();
 
-        var queryTags = query.Tags is null
+        string[]? rawTags = filters?.Tags is { Length: > 0 } ? filters.Tags : query.Tags;
+        HashSet<string> filterTags = rawTags is null
             ? new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-            : query.Tags
+            : rawTags
                 .Where(static t => !string.IsNullOrWhiteSpace(t))
                 .Select(static t => t.Trim().TrimStart('#'))
                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
-        var hasSoftFilters = query.Type.HasValue ||
-                             queryTags.Count > 0 ||
-                             !string.IsNullOrWhiteSpace(query.PathPrefix);
+        string? filterType = !string.IsNullOrWhiteSpace(filters?.Type)
+            ? filters.Type.Trim()
+            : query.Type?.ToString();
+        string? filterUsecase = string.IsNullOrWhiteSpace(filters?.Usecase)
+            ? null
+            : filters.Usecase.Trim();
+        string? filterStatus = string.IsNullOrWhiteSpace(filters?.Status)
+            ? null
+            : filters.Status.Trim();
+        string? rawPrefix = !string.IsNullOrWhiteSpace(filters?.PathPrefix)
+            ? filters.PathPrefix
+            : query.PathPrefix;
+        string? filterPrefix = string.IsNullOrWhiteSpace(rawPrefix)
+            ? null
+            : NormalizePath(rawPrefix);
+        HashSet<string> filterUp = filters?.Up is { Length: > 0 }
+            ? filters.Up
+                .Where(static u => !string.IsNullOrWhiteSpace(u))
+                .Select(NormalizePath)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase)
+            : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-        if (tokens.Count == 0 && !hasSoftFilters)
+        bool hasAnyFilterCriteria = filterTags.Count > 0 ||
+                                    filterType is not null ||
+                                    filterUsecase is not null ||
+                                    filterStatus is not null ||
+                                    filterPrefix is not null ||
+                                    filterUp.Count > 0;
+
+        bool canAttemptVector = useVector &&
+                                _embeddingClient is not null &&
+                                !string.IsNullOrWhiteSpace(query.Text);
+
+        if (!useLexical && !canAttemptVector)
         {
-            lexicalSw.Stop();
             totalSw.Stop();
-            return new SearchResult(
-                Hits: [],
-                Timing: new SearchTiming(
-                    LexicalMs: lexicalSw.Elapsed.TotalMilliseconds,
-                    VectorMs: 0,
-                    TotalMs: totalSw.Elapsed.TotalMilliseconds));
+            return (
+                new SearchResult(
+                    Hits: Array.Empty<SearchHit>(),
+                    Timing: new SearchTiming(0.0, 0.0, totalSw.Elapsed.TotalMilliseconds)),
+                new SearchExplain(Array.Empty<RelaxationStep>(), 0.0, false, 0));
         }
 
-        var normalizedPrefix = string.IsNullOrWhiteSpace(query.PathPrefix)
-            ? null
-            : NormalizePath(query.PathPrefix);
+        if (tokens.Count == 0 && !hasAnyFilterCriteria && !canAttemptVector)
+        {
+            totalSw.Stop();
+            return (
+                new SearchResult(
+                    Hits: Array.Empty<SearchHit>(),
+                    Timing: new SearchTiming(0.0, 0.0, totalSw.Elapsed.TotalMilliseconds)),
+                new SearchExplain(Array.Empty<RelaxationStep>(), 0.0, false, 0));
+        }
 
-        await using var connection = await OpenConnectionAsync(ct).ConfigureAwait(false);
+        await using SqliteConnection connection = await OpenConnectionAsync(loadVec0: false, ct).ConfigureAwait(false);
         connection.CreateFunction<string?, string>("ru_norm", RuNormalizer.NormalizeForSearch, isDeterministic: true);
 
-        var candidates = new List<RawCandidate>();
-        var candidateLimit = Math.Max(limit * 20, 500);
+        var candidateMap = new Dictionary<string, CandidateState>(StringComparer.Ordinal);
+        var lexicalRanked = new List<RankedCandidate>();
+        var lexicalSw = Stopwatch.StartNew();
 
-        if (longTokens.Count > 0)
+        if (useLexical)
         {
-            var ftsExpr = string.Join(
-                " OR ",
-                longTokens.Select(static t => $"\"{t.Replace("\"", "\"\"", StringComparison.Ordinal)}\""));
+            var rawLexical = new List<RawCandidate>();
 
-            await using (var cmd = connection.CreateCommand())
+            if (longTokens.Count > 0)
             {
+                string ftsExpr = string.Join(
+                    " OR ",
+                    longTokens.Select(static t => $"\"{t.Replace("\"", "\"\"", StringComparison.Ordinal)}\""));
+
+                await using (SqliteCommand cmd = connection.CreateCommand())
+                {
+                    cmd.CommandText = """
+                        SELECT
+                            c.path,
+                            n.title,
+                            n.type,
+                            n.usecase,
+                            n.status,
+                            n.tags_json,
+                            n.up_json,
+                            c.header_breadcrumb,
+                            c.body,
+                            (-bm25(chunks_fts)) AS base_score
+                        FROM chunks_fts
+                        INNER JOIN chunks c ON c.chunk_id = chunks_fts.chunk_id
+                        INNER JOIN notes n ON n.path = c.path
+                        WHERE chunks_fts MATCH @ftsExpr
+                        ORDER BY base_score DESC
+                        LIMIT @candidateLimit;
+                        """;
+                    cmd.Parameters.AddWithValue("@ftsExpr", ftsExpr);
+                    cmd.Parameters.AddWithValue("@candidateLimit", candidateLimit);
+
+                    await ReadCandidatesAsync(cmd, rawLexical, ct).ConfigureAwait(false);
+                }
+
+                HashSet<string> matchedPaths = rawLexical.Select(static c => c.Path).ToHashSet(StringComparer.Ordinal);
+                await using SqliteCommand titleCmd = connection.CreateCommand();
+                var titleClauses = new StringBuilder();
+                for (int i = 0; i < longTokens.Count; i++)
+                {
+                    if (i > 0)
+                    {
+                        titleClauses.Append(" OR ");
+                    }
+
+                    string paramName = $"@ttok{i}";
+                    titleClauses.Append($"ru_norm(n.title) LIKE '%' || {paramName} || '%'");
+                    titleCmd.Parameters.AddWithValue(paramName, longTokens[i]);
+                }
+
+                titleCmd.CommandText = $"""
+                    SELECT
+                        n.path,
+                        n.title,
+                        n.type,
+                        n.usecase,
+                        n.status,
+                        n.tags_json,
+                        n.up_json,
+                        COALESCE(c.header_breadcrumb, ''),
+                        COALESCE(c.body, ''),
+                        0.0 AS base_score
+                    FROM notes n
+                    LEFT JOIN chunks c ON c.path = n.path AND c.chunk_index = 0
+                    WHERE ({titleClauses})
+                    LIMIT @candidateLimit;
+                    """;
+                titleCmd.Parameters.AddWithValue("@candidateLimit", candidateLimit);
+
+                var titleCandidates = new List<RawCandidate>();
+                await ReadCandidatesAsync(titleCmd, titleCandidates, ct).ConfigureAwait(false);
+                foreach (RawCandidate tc in titleCandidates)
+                {
+                    if (!matchedPaths.Contains(tc.Path))
+                    {
+                        rawLexical.Add(tc);
+                    }
+                }
+            }
+            else if (tokens.Count > 0)
+            {
+                await using SqliteCommand cmd = connection.CreateCommand();
+                var clauses = new StringBuilder();
+                for (int i = 0; i < tokens.Count; i++)
+                {
+                    if (i > 0)
+                    {
+                        clauses.Append(" OR ");
+                    }
+
+                    string paramName = $"@tok{i}";
+                    clauses.Append(
+                        $"(c.body_norm LIKE '%' || {paramName} || '%' " +
+                        $"OR n.title LIKE '%' || {paramName} || '%' " +
+                        $"OR ru_norm(n.title) LIKE '%' || {paramName} || '%')");
+                    cmd.Parameters.AddWithValue(paramName, tokens[i]);
+                }
+
+                cmd.CommandText = $"""
+                    SELECT
+                        c.path,
+                        n.title,
+                        n.type,
+                        n.usecase,
+                        n.status,
+                        n.tags_json,
+                        n.up_json,
+                        c.header_breadcrumb,
+                        c.body,
+                        1.0 AS base_score
+                    FROM chunks c
+                    INNER JOIN notes n ON n.path = c.path
+                    WHERE ({clauses})
+                    LIMIT @candidateLimit;
+                    """;
+                cmd.Parameters.AddWithValue("@candidateLimit", candidateLimit);
+
+                await ReadCandidatesAsync(cmd, rawLexical, ct).ConfigureAwait(false);
+            }
+            else if (hasAnyFilterCriteria)
+            {
+                await using SqliteCommand cmd = connection.CreateCommand();
                 cmd.CommandText = """
                     SELECT
                         c.path,
                         n.title,
                         n.type,
+                        n.usecase,
+                        n.status,
                         n.tags_json,
+                        n.up_json,
                         c.header_breadcrumb,
                         c.body,
-                        (-bm25(chunks_fts)) AS base_score
-                    FROM chunks_fts
-                    INNER JOIN chunks c ON c.chunk_id = chunks_fts.chunk_id
-                    INNER JOIN notes n ON n.path = c.path
-                    WHERE chunks_fts MATCH @ftsExpr
-                    ORDER BY base_score DESC
-                    LIMIT @candidateLimit;
+                        1.0 AS base_score
+                    FROM chunks c
+                    INNER JOIN notes n ON n.path = c.path;
                     """;
-                cmd.Parameters.AddWithValue("@ftsExpr", ftsExpr);
-                cmd.Parameters.AddWithValue("@candidateLimit", candidateLimit);
 
-                await ReadCandidatesAsync(cmd, candidates, ct).ConfigureAwait(false);
+                await ReadCandidatesAsync(cmd, rawLexical, ct).ConfigureAwait(false);
             }
 
-            // Include notes whose title matches a query token even if the body did not match FTS5.
-            var matchedPaths = candidates.Select(static c => c.Path).ToHashSet(StringComparer.Ordinal);
-            await using var titleCmd = connection.CreateCommand();
-            var titleClauses = new StringBuilder();
-            for (var i = 0; i < longTokens.Count; i++)
+            foreach (RawCandidate raw in rawLexical)
             {
-                if (i > 0)
+                ct.ThrowIfCancellationRequested();
+
+                if (!candidateMap.TryGetValue(raw.Path, out CandidateState? state))
                 {
-                    titleClauses.Append(" OR ");
+                    state = CreateCandidateState(raw);
+                    state.LexicalScore = raw.BaseScore;
+                    candidateMap[raw.Path] = state;
                 }
-
-                var paramName = $"@ttok{i}";
-                titleClauses.Append($"ru_norm(n.title) LIKE '%' || {paramName} || '%'");
-                titleCmd.Parameters.AddWithValue(paramName, longTokens[i]);
+                else if (raw.BaseScore > state.LexicalScore)
+                {
+                    state.LexicalScore = raw.BaseScore;
+                    state.HeaderBreadcrumb = raw.HeaderBreadcrumb;
+                    state.Body = raw.Body;
+                }
             }
 
-            titleCmd.CommandText = $"""
-                SELECT
-                    n.path,
-                    n.title,
-                    n.type,
-                    n.tags_json,
-                    COALESCE(c.header_breadcrumb, ''),
-                    COALESCE(c.body, ''),
-                    0.0 AS base_score
-                FROM notes n
-                LEFT JOIN chunks c ON c.path = n.path AND c.chunk_index = 0
-                WHERE ({titleClauses})
-                LIMIT @candidateLimit;
-                """;
-            titleCmd.Parameters.AddWithValue("@candidateLimit", candidateLimit);
+            lexicalRanked = candidateMap.Values
+                .OrderByDescending(static x => x.LexicalScore)
+                .ThenBy(static x => x.Path, StringComparer.Ordinal)
+                .Select(static x => new RankedCandidate(x.Path, x.LexicalScore))
+                .ToList();
+        }
 
-            var titleCandidates = new List<RawCandidate>();
-            await ReadCandidatesAsync(titleCmd, titleCandidates, ct).ConfigureAwait(false);
-            foreach (var tc in titleCandidates)
+        lexicalSw.Stop();
+
+        var vectorSw = Stopwatch.StartNew();
+        var vectorRanked = new List<RankedCandidate>();
+        bool vectorUsed = false;
+
+        if (canAttemptVector)
+        {
+            int vectorRowCount = await CountRowsAsync(connection, transaction: null, "chunk_vectors", ct)
+                .ConfigureAwait(false);
+
+            if (vectorRowCount > 0)
             {
-                if (!matchedPaths.Contains(tc.Path))
+                float[] queryVector = await _embeddingClient!.EmbedQueryAsync(query.Text, ct).ConfigureAwait(false);
+
+                if (queryVector.Length > 0)
                 {
-                    candidates.Add(tc);
+                    vectorUsed = true;
+                    var bestVectorByPath = new Dictionary<string, (double Score, RawCandidate Raw)>(StringComparer.Ordinal);
+
+                    await using SqliteCommand vecCmd = connection.CreateCommand();
+                    vecCmd.CommandText = """
+                        SELECT
+                            c.path,
+                            n.title,
+                            n.type,
+                            n.usecase,
+                            n.status,
+                            n.tags_json,
+                            n.up_json,
+                            c.header_breadcrumb,
+                            c.body,
+                            cv.embedding
+                        FROM chunk_vectors cv
+                        INNER JOIN chunks c ON c.chunk_id = cv.chunk_id
+                        INNER JOIN notes n ON n.path = c.path;
+                        """;
+
+                    await using SqliteDataReader reader = await vecCmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
+                    while (await reader.ReadAsync(ct).ConfigureAwait(false))
+                    {
+                        ct.ThrowIfCancellationRequested();
+
+                        byte[] blob = (byte[])reader.GetValue(9);
+                        if (blob.Length == 0 || blob.Length % sizeof(float) != 0)
+                        {
+                            continue;
+                        }
+
+                        float[] docVector = SimdCosine.FromBytes(blob);
+                        if (docVector.Length != queryVector.Length)
+                        {
+                            continue;
+                        }
+
+                        double cos = SimdCosine.CosineNormalized(queryVector, docVector);
+                        string path = reader.GetString(0);
+
+                        if (!bestVectorByPath.TryGetValue(path, out (double Score, RawCandidate Raw) existingVec) ||
+                            cos > existingVec.Score)
+                        {
+                            var raw = new RawCandidate(
+                                Path: path,
+                                Title: reader.GetString(1),
+                                Type: reader.GetString(2),
+                                Usecase: reader.GetString(3),
+                                Status: reader.GetString(4),
+                                TagsJson: reader.GetString(5),
+                                UpJson: reader.GetString(6),
+                                HeaderBreadcrumb: reader.GetString(7),
+                                Body: reader.GetString(8),
+                                BaseScore: cos);
+
+                            bestVectorByPath[path] = (cos, raw);
+                        }
+                    }
+
+                    foreach (KeyValuePair<string, (double Score, RawCandidate Raw)> kvp in bestVectorByPath)
+                    {
+                        if (!candidateMap.TryGetValue(kvp.Key, out CandidateState? state))
+                        {
+                            state = CreateCandidateState(kvp.Value.Raw);
+                            state.VectorScore = kvp.Value.Score;
+                            candidateMap[kvp.Key] = state;
+                        }
+                        else
+                        {
+                            state.VectorScore = kvp.Value.Score;
+                            if (state.Body.Length == 0)
+                            {
+                                state.HeaderBreadcrumb = kvp.Value.Raw.HeaderBreadcrumb;
+                                state.Body = kvp.Value.Raw.Body;
+                            }
+                        }
+                    }
+
+                    vectorRanked = bestVectorByPath.Values
+                        .OrderByDescending(static x => x.Score)
+                        .ThenBy(static x => x.Raw.Path, StringComparer.Ordinal)
+                        .Take(candidateLimit)
+                        .Select(static x => new RankedCandidate(x.Raw.Path, x.Score))
+                        .ToList();
                 }
             }
         }
-        else if (tokens.Count > 0)
+
+        vectorSw.Stop();
+
+        var directCandidates = new List<CandidateState>();
+        if (useLexical && vectorUsed)
         {
-            // All normalized tokens are shorter than 3 chars: trigram MATCH always yields 0 hits.
-            await using var cmd = connection.CreateCommand();
-            var clauses = new StringBuilder();
-            for (var i = 0; i < tokens.Count; i++)
+            IReadOnlyList<RrfHit> fused = RrfMerger.Merge(
+                lexicalRanked,
+                vectorRanked,
+                k: RrfConstantK,
+                lexicalWeight: 1.0,
+                vectorWeight: 1.0,
+                limit: candidateLimit);
+
+            foreach (RrfHit hit in fused)
             {
-                if (i > 0)
+                if (candidateMap.TryGetValue(hit.Id, out CandidateState? state))
                 {
-                    clauses.Append(" OR ");
+                    state.Score = hit.Score;
+                    state.IsDirectHit = true;
+                    directCandidates.Add(state);
+                }
+            }
+        }
+        else if (useLexical)
+        {
+            foreach (RankedCandidate ranked in lexicalRanked)
+            {
+                if (candidateMap.TryGetValue(ranked.Id, out CandidateState? state))
+                {
+                    state.Score = ranked.Score;
+                    state.IsDirectHit = true;
+                    directCandidates.Add(state);
+                }
+            }
+        }
+        else if (vectorUsed)
+        {
+            foreach (RankedCandidate ranked in vectorRanked)
+            {
+                if (candidateMap.TryGetValue(ranked.Id, out CandidateState? state))
+                {
+                    state.Score = ranked.Score;
+                    state.IsDirectHit = true;
+                    directCandidates.Add(state);
+                }
+            }
+        }
+
+        var allCandidates = new List<CandidateState>(directCandidates);
+
+        if (useGraph && directCandidates.Count > 0)
+        {
+            List<string> seedPaths = directCandidates
+                .Take(3)
+                .Select(static c => c.Path)
+                .ToList();
+            HashSet<string> directPathSet = directCandidates
+                .Select(static c => c.Path)
+                .ToHashSet(StringComparer.Ordinal);
+
+            List<(string NeighborPath, double Weight)> neighbors = await FetchOneHopNeighborsAsync(
+                connection,
+                seedPaths,
+                directPathSet,
+                ct).ConfigureAwait(false);
+
+            if (neighbors.Count > 0)
+            {
+                double minDirectScore = directCandidates.Min(static c => c.Score);
+                double floor = minDirectScore > 0.0 ? minDirectScore * 0.5 : 0.001;
+                double maxEdgeWeight = neighbors.Max(static n => n.Weight);
+                if (maxEdgeWeight <= 0.0)
+                {
+                    maxEdgeWeight = 1.0;
                 }
 
-                var paramName = $"@tok{i}";
-                clauses.Append(
-                    $"(c.body_norm LIKE '%' || {paramName} || '%' " +
-                    $"OR n.title LIKE '%' || {paramName} || '%' " +
-                    $"OR ru_norm(n.title) LIKE '%' || {paramName} || '%')");
-                cmd.Parameters.AddWithValue(paramName, tokens[i]);
+                Dictionary<string, RawCandidate> neighborNotes = await FetchNotesByPathsAsync(
+                    connection,
+                    neighbors.Select(static n => n.NeighborPath).ToList(),
+                    ct).ConfigureAwait(false);
+
+                foreach ((string neighborPath, double weight) in neighbors)
+                {
+                    if (!neighborNotes.TryGetValue(neighborPath, out RawCandidate? raw))
+                    {
+                        continue;
+                    }
+
+                    CandidateState neighborState = CreateCandidateState(raw);
+                    double normalizedWeight = Math.Clamp(weight / maxEdgeWeight, 0.01, 1.0);
+                    neighborState.Score = floor * normalizedWeight;
+                    neighborState.IsDirectHit = false;
+                    allCandidates.Add(neighborState);
+                }
+            }
+        }
+
+        int candidatesBeforeFilters = allCandidates.Count;
+        var appliedRelaxations = new List<RelaxationStep>();
+        List<CandidateState> selectedCandidates;
+
+        if (filters is { Strict: true })
+        {
+            bool requireStatus = filterStatus is not null;
+            bool requireType = filterType is not null;
+            bool requireTags = filterTags.Count > 0;
+            bool requirePrefix = filterPrefix is not null;
+            bool requireUsecase = filterUsecase is not null;
+            bool requireUp = filterUp.Count > 0;
+
+            int minHits = filters.MinHits > 0 ? filters.MinHits : 1;
+
+            selectedCandidates = ApplyStrictFilters(
+                allCandidates,
+                requireStatus ? filterStatus : null,
+                requireType ? filterType : null,
+                requireTags ? filterTags : null,
+                requirePrefix ? filterPrefix : null,
+                requireUsecase ? filterUsecase : null,
+                requireUp ? filterUp : null);
+
+            int order = 1;
+
+            if (selectedCandidates.Count < minHits && requireStatus)
+            {
+                int before = selectedCandidates.Count;
+                requireStatus = false;
+                selectedCandidates = ApplyStrictFilters(
+                    allCandidates,
+                    null,
+                    requireType ? filterType : null,
+                    requireTags ? filterTags : null,
+                    requirePrefix ? filterPrefix : null,
+                    requireUsecase ? filterUsecase : null,
+                    requireUp ? filterUp : null);
+                appliedRelaxations.Add(new RelaxationStep(
+                    order++,
+                    "status",
+                    $"Relaxed 'status' filter because hits ({before}) < MinHits ({minHits})."));
             }
 
-            cmd.CommandText = $"""
-                SELECT
-                    c.path,
-                    n.title,
-                    n.type,
-                    n.tags_json,
-                    c.header_breadcrumb,
-                    c.body,
-                    1.0 AS base_score
-                FROM chunks c
-                INNER JOIN notes n ON n.path = c.path
-                WHERE ({clauses})
-                LIMIT @candidateLimit;
-                """;
-            cmd.Parameters.AddWithValue("@candidateLimit", candidateLimit);
+            if (selectedCandidates.Count < minHits && requireType)
+            {
+                int before = selectedCandidates.Count;
+                requireType = false;
+                selectedCandidates = ApplyStrictFilters(
+                    allCandidates,
+                    null,
+                    null,
+                    requireTags ? filterTags : null,
+                    requirePrefix ? filterPrefix : null,
+                    requireUsecase ? filterUsecase : null,
+                    requireUp ? filterUp : null);
+                appliedRelaxations.Add(new RelaxationStep(
+                    order++,
+                    "type",
+                    $"Relaxed 'type' filter because hits ({before}) < MinHits ({minHits})."));
+            }
 
-            await ReadCandidatesAsync(cmd, candidates, ct).ConfigureAwait(false);
+            if (selectedCandidates.Count < minHits && requireTags)
+            {
+                int before = selectedCandidates.Count;
+                requireTags = false;
+                selectedCandidates = ApplyStrictFilters(
+                    allCandidates,
+                    null,
+                    null,
+                    null,
+                    requirePrefix ? filterPrefix : null,
+                    requireUsecase ? filterUsecase : null,
+                    requireUp ? filterUp : null);
+                appliedRelaxations.Add(new RelaxationStep(
+                    order++,
+                    "tags",
+                    $"Relaxed 'tags' filter because hits ({before}) < MinHits ({minHits})."));
+            }
+
+            if (selectedCandidates.Count < minHits && requirePrefix)
+            {
+                int before = selectedCandidates.Count;
+                requirePrefix = false;
+                selectedCandidates = ApplyStrictFilters(
+                    allCandidates,
+                    null,
+                    null,
+                    null,
+                    null,
+                    requireUsecase ? filterUsecase : null,
+                    requireUp ? filterUp : null);
+                appliedRelaxations.Add(new RelaxationStep(
+                    order++,
+                    "prefix",
+                    $"Relaxed 'prefix' filter because hits ({before}) < MinHits ({minHits})."));
+            }
         }
         else
         {
-            // Empty query text with soft filters: select candidates without MATCH and rank by filter boosts.
-            await using var cmd = connection.CreateCommand();
-            cmd.CommandText = """
-                SELECT
-                    c.path,
-                    n.title,
-                    n.type,
-                    n.tags_json,
-                    c.header_breadcrumb,
-                    c.body,
-                    1.0 AS base_score
-                FROM chunks c
-                INNER JOIN notes n ON n.path = c.path;
-                """;
-
-            await ReadCandidatesAsync(cmd, candidates, ct).ConfigureAwait(false);
+            selectedCandidates = allCandidates;
         }
 
-        var bestByPath = new Dictionary<string, ScoredCandidate>(StringComparer.Ordinal);
-        var expectedTypeName = query.Type?.ToString();
+        double boostScale = vectorUsed ? 0.005 : 1.0;
+        double maxTagBoostApplied = 0.0;
 
-        foreach (var candidate in candidates)
+        foreach (CandidateState candidate in selectedCandidates)
         {
             ct.ThrowIfCancellationRequested();
 
-            var noteTags = DeserializeTags(candidate.TagsJson);
-            var score = candidate.BaseScore;
-
-            if (expectedTypeName is not null &&
-                string.Equals(candidate.Type, expectedTypeName, StringComparison.OrdinalIgnoreCase))
+            if (!candidate.IsDirectHit)
             {
-                score += 0.25;
+                continue;
             }
 
-            if (normalizedPrefix is not null &&
-                candidate.Path.StartsWith(normalizedPrefix, StringComparison.OrdinalIgnoreCase))
+            if (filterType is not null &&
+                string.Equals(candidate.Type, filterType, StringComparison.OrdinalIgnoreCase))
             {
-                score += 0.20;
+                candidate.Score += 0.25 * boostScale;
             }
 
-            if (queryTags.Count > 0 && noteTags.Length > 0)
+            if (filterPrefix is not null &&
+                candidate.Path.StartsWith(filterPrefix, StringComparison.OrdinalIgnoreCase))
             {
-                var matchedTagCount = 0;
-                foreach (var noteTag in noteTags)
+                candidate.Score += 0.20 * boostScale;
+            }
+
+            if (filterTags.Count > 0 && candidate.Tags.Length > 0)
+            {
+                int matchedTagCount = 0;
+                foreach (string noteTag in candidate.Tags)
                 {
-                    if (queryTags.Contains(noteTag.Trim().TrimStart('#')))
+                    if (filterTags.Contains(noteTag.Trim().TrimStart('#')))
                     {
                         matchedTagCount++;
                     }
                 }
 
-                score += Math.Min(0.45, matchedTagCount * 0.15);
+                double tagBoost = Math.Min(0.45, matchedTagCount * 0.15) * boostScale;
+                candidate.Score += tagBoost;
+                if (tagBoost > maxTagBoostApplied)
+                {
+                    maxTagBoostApplied = tagBoost;
+                }
+            }
+
+            if (filterUsecase is not null &&
+                string.Equals(candidate.Usecase, filterUsecase, StringComparison.OrdinalIgnoreCase))
+            {
+                candidate.Score += 0.15 * boostScale;
+            }
+
+            if (filterStatus is not null &&
+                string.Equals(candidate.Status, filterStatus, StringComparison.OrdinalIgnoreCase))
+            {
+                candidate.Score += 0.15 * boostScale;
+            }
+
+            if (filterUp.Count > 0 && candidate.Up.Length > 0 &&
+                candidate.Up.Any(u => filterUp.Contains(NormalizePath(u))))
+            {
+                candidate.Score += 0.20 * boostScale;
             }
 
             if (tokens.Count > 0 && HasTitleMatch(candidate.Title, tokens))
             {
-                score += 0.30;
-            }
-
-            if (!bestByPath.TryGetValue(candidate.Path, out var existing) || score > existing.Score)
-            {
-                bestByPath[candidate.Path] = new ScoredCandidate(
-                    Path: candidate.Path,
-                    Title: candidate.Title,
-                    HeaderBreadcrumb: candidate.HeaderBreadcrumb,
-                    Body: candidate.Body,
-                    Tags: noteTags,
-                    Score: score);
+                candidate.Score += 0.30 * boostScale;
             }
         }
 
-        var topCandidates = bestByPath.Values
-            .OrderByDescending(static x => x.Score)
+        List<CandidateState> topCandidates = selectedCandidates
+            .OrderByDescending(static x => x.IsDirectHit)
+            .ThenByDescending(static x => x.Score)
             .ThenBy(static x => x.Path, StringComparer.Ordinal)
             .Take(limit)
             .ToList();
 
         var hits = new List<SearchHit>(topCandidates.Count);
-        foreach (var item in topCandidates)
+        foreach (CandidateState item in topCandidates)
         {
-            var snippet = BuildSnippet(item.Body, tokens, query.Text);
-            var header = string.IsNullOrWhiteSpace(item.HeaderBreadcrumb) ? null : item.HeaderBreadcrumb;
+            string snippet = BuildSnippet(item.Body, tokens, query.Text);
+            string? header = string.IsNullOrWhiteSpace(item.HeaderBreadcrumb) ? null : item.HeaderBreadcrumb;
 
             hits.Add(new SearchHit(
                 Path: item.Path,
@@ -585,15 +1043,22 @@ public sealed class SqliteVaultIndex : IVaultIndex, IDisposable
                 Tags: item.Tags));
         }
 
-        lexicalSw.Stop();
         totalSw.Stop();
 
-        return new SearchResult(
+        var result = new SearchResult(
             Hits: hits,
             Timing: new SearchTiming(
                 LexicalMs: lexicalSw.Elapsed.TotalMilliseconds,
-                VectorMs: 0,
+                VectorMs: vectorSw.Elapsed.TotalMilliseconds,
                 TotalMs: totalSw.Elapsed.TotalMilliseconds));
+
+        var explain = new SearchExplain(
+            Applied: appliedRelaxations,
+            TagBoost: maxTagBoostApplied,
+            VectorUsed: vectorUsed,
+            CandidatesBeforeFilters: candidatesBeforeFilters);
+
+        return (result, explain);
     }
 
     public void Dispose()
@@ -607,7 +1072,7 @@ public sealed class SqliteVaultIndex : IVaultIndex, IDisposable
         _writeLock.Dispose();
     }
 
-    private async Task<SqliteConnection> OpenConnectionAsync(CancellationToken ct)
+    private async Task<SqliteConnection> OpenConnectionAsync(bool loadVec0, CancellationToken ct)
     {
         var connection = new SqliteConnection(_connectionString);
         await connection.OpenAsync(ct).ConfigureAwait(false);
@@ -623,6 +1088,19 @@ public sealed class SqliteVaultIndex : IVaultIndex, IDisposable
             """;
         await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
 
+        if (loadVec0)
+        {
+            try
+            {
+                connection.EnableExtensions(true);
+                connection.LoadExtension("vec0", "sqlite3_vec_init");
+            }
+            catch (Exception)
+            {
+                // Keep operating via chunk_vectors when vec0 is unavailable.
+            }
+        }
+
         return connection;
     }
 
@@ -631,6 +1109,7 @@ public sealed class SqliteVaultIndex : IVaultIndex, IDisposable
         SqliteTransaction transaction,
         NoteDocument doc,
         string nowIso,
+        bool vec0Available,
         CancellationToken ct)
     {
         var normalizedPath = NormalizePath(doc.Path);
@@ -643,6 +1122,25 @@ public sealed class SqliteVaultIndex : IVaultIndex, IDisposable
             : new ChunkPolicy(Strategy: "by_header");
 
         var chunks = MarkdownChunker.Chunk(normalizedDoc, policy);
+
+        if (vec0Available)
+        {
+            try
+            {
+                await using var delVec0Cmd = connection.CreateCommand();
+                delVec0Cmd.Transaction = transaction;
+                delVec0Cmd.CommandText = """
+                    DELETE FROM vec_chunks
+                    WHERE chunk_id IN (SELECT chunk_id FROM chunks WHERE path = @path);
+                    """;
+                delVec0Cmd.Parameters.AddWithValue("@path", normalizedPath);
+                await delVec0Cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+            }
+            catch (SqliteException)
+            {
+                // Ignore if vec_chunks virtual table does not exist in this database file.
+            }
+        }
 
         await using (var delFtsCmd = connection.CreateCommand())
         {
@@ -952,8 +1450,28 @@ public sealed class SqliteVaultIndex : IVaultIndex, IDisposable
         SqliteConnection connection,
         SqliteTransaction transaction,
         string normalizedPath,
+        bool vec0Available,
         CancellationToken ct)
     {
+        if (vec0Available)
+        {
+            try
+            {
+                await using var delVec0Cmd = connection.CreateCommand();
+                delVec0Cmd.Transaction = transaction;
+                delVec0Cmd.CommandText = """
+                    DELETE FROM vec_chunks
+                    WHERE chunk_id IN (SELECT chunk_id FROM chunks WHERE path = @path);
+                    """;
+                delVec0Cmd.Parameters.AddWithValue("@path", normalizedPath);
+                await delVec0Cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+            }
+            catch (SqliteException)
+            {
+                // Ignore if vec_chunks virtual table does not exist in this database file.
+            }
+        }
+
         await using (var delFtsCmd = connection.CreateCommand())
         {
             delFtsCmd.Transaction = transaction;
@@ -1000,16 +1518,63 @@ public sealed class SqliteVaultIndex : IVaultIndex, IDisposable
         }
     }
 
-    private static async Task<int> CountChunksAsync(
+    private static async Task<int> CountRowsAsync(
         SqliteConnection connection,
         SqliteTransaction? transaction,
+        string tableName,
         CancellationToken ct)
     {
         await using var cmd = connection.CreateCommand();
         cmd.Transaction = transaction;
-        cmd.CommandText = "SELECT COUNT(*) FROM chunks;";
-        var scalar = await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false);
+        cmd.CommandText = tableName switch
+        {
+            "chunks" => "SELECT COUNT(*) FROM chunks;",
+            "chunk_vectors" => "SELECT COUNT(*) FROM chunk_vectors;",
+            _ => throw new ArgumentOutOfRangeException(nameof(tableName), tableName, "Unsupported table.")
+        };
+
+        object? scalar = await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false);
         return scalar is null or DBNull ? 0 : Convert.ToInt32(scalar, CultureInfo.InvariantCulture);
+    }
+
+    private static async Task<(string EmbeddingModel, int Dimensions)> ReadEmbeddingMetaAsync(
+        SqliteConnection connection,
+        SqliteTransaction? transaction,
+        CancellationToken ct)
+    {
+        string model = "none";
+        int dimensions = 0;
+
+        await using var cmd = connection.CreateCommand();
+        cmd.Transaction = transaction;
+        cmd.CommandText = """
+            SELECT key, value
+            FROM index_meta
+            WHERE key IN (@modelKey, @dimsKey);
+            """;
+        cmd.Parameters.AddWithValue("@modelKey", EmbeddingModelMetaKey);
+        cmd.Parameters.AddWithValue("@dimsKey", DimensionsMetaKey);
+
+        await using SqliteDataReader reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
+        while (await reader.ReadAsync(ct).ConfigureAwait(false))
+        {
+            string key = reader.GetString(0);
+            string val = reader.GetString(1);
+
+            if (string.Equals(key, EmbeddingModelMetaKey, StringComparison.Ordinal) &&
+                !string.IsNullOrWhiteSpace(val))
+            {
+                model = val;
+            }
+            else if (string.Equals(key, DimensionsMetaKey, StringComparison.Ordinal) &&
+                     int.TryParse(val, NumberStyles.Integer, CultureInfo.InvariantCulture, out int parsedDims) &&
+                     parsedDims > 0)
+            {
+                dimensions = parsedDims;
+            }
+        }
+
+        return (model, dimensions);
     }
 
     private static async Task ReadCandidatesAsync(
@@ -1024,21 +1589,214 @@ public sealed class SqliteVaultIndex : IVaultIndex, IDisposable
                 Path: reader.GetString(0),
                 Title: reader.GetString(1),
                 Type: reader.GetString(2),
-                TagsJson: reader.GetString(3),
-                HeaderBreadcrumb: reader.GetString(4),
-                Body: reader.GetString(5),
-                BaseScore: reader.IsDBNull(6) ? 0.0 : reader.GetDouble(6)));
+                Usecase: reader.GetString(3),
+                Status: reader.GetString(4),
+                TagsJson: reader.GetString(5),
+                UpJson: reader.GetString(6),
+                HeaderBreadcrumb: reader.GetString(7),
+                Body: reader.GetString(8),
+                BaseScore: reader.IsDBNull(9) ? 0.0 : reader.GetDouble(9)));
         }
     }
 
-    private static string[] DeserializeTags(string tagsJson)
+    private static async Task<List<(string NeighborPath, double Weight)>> FetchOneHopNeighborsAsync(
+        SqliteConnection connection,
+        IReadOnlyList<string> seedPaths,
+        HashSet<string> excludedPaths,
+        CancellationToken ct)
     {
-        if (string.IsNullOrWhiteSpace(tagsJson))
+        if (seedPaths.Count == 0)
         {
-            return [];
+            return new List<(string, double)>();
         }
 
-        return JsonSerializer.Deserialize<string[]>(tagsJson, JsonOptions) ?? [];
+        await using SqliteCommand cmd = connection.CreateCommand();
+        var placeholders = new string[seedPaths.Count];
+        for (int i = 0; i < seedPaths.Count; i++)
+        {
+            string pName = $"@s{i}";
+            placeholders[i] = pName;
+            cmd.Parameters.AddWithValue(pName, seedPaths[i]);
+        }
+
+        string inClause = string.Join(", ", placeholders);
+        cmd.CommandText = $"""
+            SELECT src_path, dst_path, weight
+            FROM edges
+            WHERE src_path IN ({inClause}) OR dst_path IN ({inClause});
+            """;
+
+        HashSet<string> seedSet = seedPaths.ToHashSet(StringComparer.Ordinal);
+        var bestByNeighbor = new Dictionary<string, double>(StringComparer.Ordinal);
+
+        await using SqliteDataReader reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
+        while (await reader.ReadAsync(ct).ConfigureAwait(false))
+        {
+            string src = reader.GetString(0);
+            string dst = reader.GetString(1);
+            double weight = reader.GetDouble(2);
+
+            if (seedSet.Contains(src) && !excludedPaths.Contains(dst))
+            {
+                if (!bestByNeighbor.TryGetValue(dst, out double existing) || weight > existing)
+                {
+                    bestByNeighbor[dst] = weight;
+                }
+            }
+
+            if (seedSet.Contains(dst) && !excludedPaths.Contains(src))
+            {
+                if (!bestByNeighbor.TryGetValue(src, out double existing) || weight > existing)
+                {
+                    bestByNeighbor[src] = weight;
+                }
+            }
+        }
+
+        return bestByNeighbor
+            .OrderByDescending(static kvp => kvp.Value)
+            .ThenBy(static kvp => kvp.Key, StringComparer.Ordinal)
+            .Select(static kvp => (kvp.Key, kvp.Value))
+            .ToList();
+    }
+
+    private static async Task<Dictionary<string, RawCandidate>> FetchNotesByPathsAsync(
+        SqliteConnection connection,
+        IReadOnlyList<string> paths,
+        CancellationToken ct)
+    {
+        var result = new Dictionary<string, RawCandidate>(StringComparer.Ordinal);
+        if (paths.Count == 0)
+        {
+            return result;
+        }
+
+        await using SqliteCommand cmd = connection.CreateCommand();
+        var placeholders = new string[paths.Count];
+        for (int i = 0; i < paths.Count; i++)
+        {
+            string pName = $"@p{i}";
+            placeholders[i] = pName;
+            cmd.Parameters.AddWithValue(pName, paths[i]);
+        }
+
+        string inClause = string.Join(", ", placeholders);
+        cmd.CommandText = $"""
+            SELECT
+                n.path,
+                n.title,
+                n.type,
+                n.usecase,
+                n.status,
+                n.tags_json,
+                n.up_json,
+                COALESCE(c.header_breadcrumb, ''),
+                COALESCE(c.body, ''),
+                0.0 AS base_score
+            FROM notes n
+            LEFT JOIN chunks c ON c.path = n.path AND c.chunk_index = 0
+            WHERE n.path IN ({inClause});
+            """;
+
+        var rows = new List<RawCandidate>();
+        await ReadCandidatesAsync(cmd, rows, ct).ConfigureAwait(false);
+        foreach (RawCandidate row in rows)
+        {
+            result[row.Path] = row;
+        }
+
+        return result;
+    }
+
+    private static List<CandidateState> ApplyStrictFilters(
+        List<CandidateState> candidates,
+        string? status,
+        string? type,
+        HashSet<string>? tags,
+        string? prefix,
+        string? usecase,
+        HashSet<string>? up)
+    {
+        var filtered = new List<CandidateState>(candidates.Count);
+
+        foreach (CandidateState candidate in candidates)
+        {
+            if (status is not null &&
+                !string.Equals(candidate.Status, status, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            if (type is not null &&
+                !string.Equals(candidate.Type, type, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            if (tags is { Count: > 0 })
+            {
+                HashSet<string> candidateTags = candidate.Tags
+                    .Select(static t => t.Trim().TrimStart('#'))
+                    .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+                if (!tags.All(candidateTags.Contains))
+                {
+                    continue;
+                }
+            }
+
+            if (prefix is not null &&
+                !candidate.Path.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            if (usecase is not null &&
+                !string.Equals(candidate.Usecase, usecase, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            if (up is { Count: > 0 })
+            {
+                HashSet<string> candidateUp = candidate.Up
+                    .Select(NormalizePath)
+                    .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+                if (!up.Any(candidateUp.Contains))
+                {
+                    continue;
+                }
+            }
+
+            filtered.Add(candidate);
+        }
+
+        return filtered;
+    }
+
+    private static CandidateState CreateCandidateState(RawCandidate raw)
+    {
+        return new CandidateState(
+            Path: raw.Path,
+            Title: raw.Title,
+            Type: raw.Type,
+            Usecase: raw.Usecase,
+            Status: raw.Status,
+            Tags: DeserializeStringArray(raw.TagsJson),
+            Up: DeserializeStringArray(raw.UpJson),
+            HeaderBreadcrumb: raw.HeaderBreadcrumb,
+            Body: raw.Body);
+    }
+
+    private static string[] DeserializeStringArray(string json)
+    {
+        if (string.IsNullOrWhiteSpace(json))
+        {
+            return Array.Empty<string>();
+        }
+
+        return JsonSerializer.Deserialize<string[]>(json, JsonOptions) ?? Array.Empty<string>();
     }
 
     private static bool HasTitleMatch(string title, IReadOnlyList<string> queryTokens)
@@ -1235,16 +1993,50 @@ public sealed class SqliteVaultIndex : IVaultIndex, IDisposable
         string Path,
         string Title,
         string Type,
+        string Usecase,
+        string Status,
         string TagsJson,
+        string UpJson,
         string HeaderBreadcrumb,
         string Body,
         double BaseScore);
 
-    private sealed record ScoredCandidate(
-        string Path,
-        string Title,
-        string HeaderBreadcrumb,
-        string Body,
-        string[] Tags,
-        double Score);
+    private sealed class CandidateState
+    {
+        public CandidateState(
+            string Path,
+            string Title,
+            string Type,
+            string Usecase,
+            string Status,
+            string[] Tags,
+            string[] Up,
+            string HeaderBreadcrumb,
+            string Body)
+        {
+            this.Path = Path;
+            this.Title = Title;
+            this.Type = Type;
+            this.Usecase = Usecase;
+            this.Status = Status;
+            this.Tags = Tags;
+            this.Up = Up;
+            this.HeaderBreadcrumb = HeaderBreadcrumb;
+            this.Body = Body;
+        }
+
+        public string Path { get; }
+        public string Title { get; }
+        public string Type { get; }
+        public string Usecase { get; }
+        public string Status { get; }
+        public string[] Tags { get; }
+        public string[] Up { get; }
+        public string HeaderBreadcrumb { get; set; }
+        public string Body { get; set; }
+        public double LexicalScore { get; set; }
+        public double VectorScore { get; set; }
+        public double Score { get; set; }
+        public bool IsDirectHit { get; set; }
+    }
 }
