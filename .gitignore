@@ -1,0 +1,12 @@
+bin/
+obj/
+/packages/
+riderModule.iml
+/_ReSharper.Caches/
+.env
+.brain/
+.idea/
+*.sln
+*.slnx
+core.cs
+Program.cs
