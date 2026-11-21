@@ -1,6 +1,4 @@
-﻿using System;
-using System.Collections.Generic;
-using YamlDotNet.Serialization;
+﻿using YamlDotNet.Serialization;
 using SecondBrain.Core.Linking;
 
 namespace SecondBrain.Core.Model;

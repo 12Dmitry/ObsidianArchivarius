@@ -16,3 +16,5 @@
 ## Milestone T1
 - [x] T0: Scaffold solution & core setup (`DONE`)
 - [x] T1 (P1): Core contracts & initial setup verified (`DONE`)
+- [x] P2: DONE add FrontmatterCodec with unknown keys, canonical order and golden tests
+- [ ] P3 half
