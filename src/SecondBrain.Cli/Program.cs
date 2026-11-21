@@ -1,12 +1,8 @@
-﻿using System;
+﻿using System.Text;
+using SecondBrain.Cli;
 
-namespace SecondBrain.Cli;
+Console.OutputEncoding = Encoding.UTF8;
+Console.InputEncoding = Encoding.UTF8;
 
-public class Program
-{
-    public static void Main(string[] args)
-    {
-        Console.WriteLine("SecondBrain CLI");
-        return;
-    }
-}
+var app = new CliApp(Console.Out, Console.Error, TimeProvider.System);
+return await app.RunAsync(args);
