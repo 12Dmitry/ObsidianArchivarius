@@ -390,7 +390,7 @@ public sealed class SqliteVaultIndex : IVaultIndex, IDisposable
         return result;
     }
 
-    public async Task<(SearchResult Result, SearchExplain Explain)> SearchDetailedAsync(
+public async Task<(SearchResult Result, SearchExplain Explain)> SearchDetailedAsync(
         SearchQuery query,
         SearchFilters? filters = null,
         bool useLexical = true,
@@ -478,20 +478,135 @@ public sealed class SqliteVaultIndex : IVaultIndex, IDisposable
 
         var candidateMap = new Dictionary<string, CandidateState>(StringComparer.Ordinal);
         var lexicalRanked = new List<RankedCandidate>();
-        var lexicalSw = Stopwatch.StartNew();
+        var lexicalSw = new Stopwatch();
 
         if (useLexical)
         {
-            var rawLexical = new List<RawCandidate>();
-
-            if (longTokens.Count > 0)
+            lexicalSw.Start();
+            try
             {
-                string ftsExpr = string.Join(
-                    " OR ",
-                    longTokens.Select(static t => $"\"{t.Replace("\"", "\"\"", StringComparison.Ordinal)}\""));
+                var rawLexical = new List<RawCandidate>();
 
-                await using (SqliteCommand cmd = connection.CreateCommand())
+                if (longTokens.Count > 0)
                 {
+                    string ftsExpr = string.Join(
+                        " OR ",
+                        longTokens.Select(static t => $"\"{t.Replace("\"", "\"\"", StringComparison.Ordinal)}\""));
+
+                    await using (SqliteCommand cmd = connection.CreateCommand())
+                    {
+                        cmd.CommandText = """
+                            SELECT
+                                c.path,
+                                n.title,
+                                n.type,
+                                n.usecase,
+                                n.status,
+                                n.tags_json,
+                                n.up_json,
+                                c.header_breadcrumb,
+                                c.body,
+                                (-bm25(chunks_fts)) AS base_score
+                            FROM chunks_fts
+                            INNER JOIN chunks c ON c.chunk_id = chunks_fts.chunk_id
+                            INNER JOIN notes n ON n.path = c.path
+                            WHERE chunks_fts MATCH @ftsExpr
+                            ORDER BY base_score DESC
+                            LIMIT @candidateLimit;
+                            """;
+                        cmd.Parameters.AddWithValue("@ftsExpr", ftsExpr);
+                        cmd.Parameters.AddWithValue("@candidateLimit", candidateLimit);
+
+                        await ReadCandidatesAsync(cmd, rawLexical, ct).ConfigureAwait(false);
+                    }
+
+                    HashSet<string> matchedPaths = rawLexical.Select(static c => c.Path).ToHashSet(StringComparer.Ordinal);
+                    await using SqliteCommand titleCmd = connection.CreateCommand();
+                    var titleClauses = new StringBuilder();
+                    for (int i = 0; i < longTokens.Count; i++)
+                    {
+                        if (i > 0)
+                        {
+                            titleClauses.Append(" OR ");
+                        }
+
+                        string paramName = $"@ttok{i}";
+                        titleClauses.Append($"ru_norm(n.title) LIKE '%' || {paramName} || '%'");
+                        titleCmd.Parameters.AddWithValue(paramName, longTokens[i]);
+                    }
+
+                    titleCmd.CommandText = $"""
+                        SELECT
+                            n.path,
+                            n.title,
+                            n.type,
+                            n.usecase,
+                            n.status,
+                            n.tags_json,
+                            n.up_json,
+                            COALESCE(c.header_breadcrumb, ''),
+                            COALESCE(c.body, ''),
+                            0.0 AS base_score
+                        FROM notes n
+                        LEFT JOIN chunks c ON c.path = n.path AND c.chunk_index = 0
+                        WHERE ({titleClauses})
+                        LIMIT @candidateLimit;
+                        """;
+                    titleCmd.Parameters.AddWithValue("@candidateLimit", candidateLimit);
+
+                    var titleCandidates = new List<RawCandidate>();
+                    await ReadCandidatesAsync(titleCmd, titleCandidates, ct).ConfigureAwait(false);
+                    foreach (RawCandidate tc in titleCandidates)
+                    {
+                        if (!matchedPaths.Contains(tc.Path))
+                        {
+                            rawLexical.Add(tc);
+                        }
+                    }
+                }
+                else if (tokens.Count > 0)
+                {
+                    await using SqliteCommand cmd = connection.CreateCommand();
+                    var clauses = new StringBuilder();
+                    for (int i = 0; i < tokens.Count; i++)
+                    {
+                        if (i > 0)
+                        {
+                            clauses.Append(" OR ");
+                        }
+
+                        string paramName = $"@tok{i}";
+                        clauses.Append(
+                            $"(c.body_norm LIKE '%' || {paramName} || '%' " +
+                            $"OR n.title LIKE '%' || {paramName} || '%' " +
+                            $"OR ru_norm(n.title) LIKE '%' || {paramName} || '%')");
+                        cmd.Parameters.AddWithValue(paramName, tokens[i]);
+                    }
+
+                    cmd.CommandText = $"""
+                        SELECT
+                            c.path,
+                            n.title,
+                            n.type,
+                            n.usecase,
+                            n.status,
+                            n.tags_json,
+                            n.up_json,
+                            c.header_breadcrumb,
+                            c.body,
+                            1.0 AS base_score
+                        FROM chunks c
+                        INNER JOIN notes n ON n.path = c.path
+                        WHERE ({clauses})
+                        LIMIT @candidateLimit;
+                        """;
+                    cmd.Parameters.AddWithValue("@candidateLimit", candidateLimit);
+
+                    await ReadCandidatesAsync(cmd, rawLexical, ct).ConfigureAwait(false);
+                }
+                else if (hasAnyFilterCriteria)
+                {
+                    await using SqliteCommand cmd = connection.CreateCommand();
                     cmd.CommandText = """
                         SELECT
                             c.path,
@@ -503,258 +618,154 @@ public sealed class SqliteVaultIndex : IVaultIndex, IDisposable
                             n.up_json,
                             c.header_breadcrumb,
                             c.body,
-                            (-bm25(chunks_fts)) AS base_score
-                        FROM chunks_fts
-                        INNER JOIN chunks c ON c.chunk_id = chunks_fts.chunk_id
-                        INNER JOIN notes n ON n.path = c.path
-                        WHERE chunks_fts MATCH @ftsExpr
-                        ORDER BY base_score DESC
-                        LIMIT @candidateLimit;
+                            1.0 AS base_score
+                        FROM chunks c
+                        INNER JOIN notes n ON n.path = c.path;
                         """;
-                    cmd.Parameters.AddWithValue("@ftsExpr", ftsExpr);
-                    cmd.Parameters.AddWithValue("@candidateLimit", candidateLimit);
 
                     await ReadCandidatesAsync(cmd, rawLexical, ct).ConfigureAwait(false);
                 }
 
-                HashSet<string> matchedPaths = rawLexical.Select(static c => c.Path).ToHashSet(StringComparer.Ordinal);
-                await using SqliteCommand titleCmd = connection.CreateCommand();
-                var titleClauses = new StringBuilder();
-                for (int i = 0; i < longTokens.Count; i++)
+                foreach (RawCandidate raw in rawLexical)
                 {
-                    if (i > 0)
+                    ct.ThrowIfCancellationRequested();
+
+                    if (!candidateMap.TryGetValue(raw.Path, out CandidateState? state))
                     {
-                        titleClauses.Append(" OR ");
+                        state = CreateCandidateState(raw);
+                        state.LexicalScore = raw.BaseScore;
+                        candidateMap[raw.Path] = state;
                     }
-
-                    string paramName = $"@ttok{i}";
-                    titleClauses.Append($"ru_norm(n.title) LIKE '%' || {paramName} || '%'");
-                    titleCmd.Parameters.AddWithValue(paramName, longTokens[i]);
-                }
-
-                titleCmd.CommandText = $"""
-                    SELECT
-                        n.path,
-                        n.title,
-                        n.type,
-                        n.usecase,
-                        n.status,
-                        n.tags_json,
-                        n.up_json,
-                        COALESCE(c.header_breadcrumb, ''),
-                        COALESCE(c.body, ''),
-                        0.0 AS base_score
-                    FROM notes n
-                    LEFT JOIN chunks c ON c.path = n.path AND c.chunk_index = 0
-                    WHERE ({titleClauses})
-                    LIMIT @candidateLimit;
-                    """;
-                titleCmd.Parameters.AddWithValue("@candidateLimit", candidateLimit);
-
-                var titleCandidates = new List<RawCandidate>();
-                await ReadCandidatesAsync(titleCmd, titleCandidates, ct).ConfigureAwait(false);
-                foreach (RawCandidate tc in titleCandidates)
-                {
-                    if (!matchedPaths.Contains(tc.Path))
+                    else if (raw.BaseScore > state.LexicalScore)
                     {
-                        rawLexical.Add(tc);
+                        state.LexicalScore = raw.BaseScore;
+                        state.HeaderBreadcrumb = raw.HeaderBreadcrumb;
+                        state.Body = raw.Body;
                     }
                 }
+
+                lexicalRanked = candidateMap.Values
+                    .OrderByDescending(static x => x.LexicalScore)
+                    .ThenBy(static x => x.Path, StringComparer.Ordinal)
+                    .Select(static x => new RankedCandidate(x.Path, x.LexicalScore))
+                    .ToList();
             }
-            else if (tokens.Count > 0)
+            finally
             {
-                await using SqliteCommand cmd = connection.CreateCommand();
-                var clauses = new StringBuilder();
-                for (int i = 0; i < tokens.Count; i++)
-                {
-                    if (i > 0)
-                    {
-                        clauses.Append(" OR ");
-                    }
-
-                    string paramName = $"@tok{i}";
-                    clauses.Append(
-                        $"(c.body_norm LIKE '%' || {paramName} || '%' " +
-                        $"OR n.title LIKE '%' || {paramName} || '%' " +
-                        $"OR ru_norm(n.title) LIKE '%' || {paramName} || '%')");
-                    cmd.Parameters.AddWithValue(paramName, tokens[i]);
-                }
-
-                cmd.CommandText = $"""
-                    SELECT
-                        c.path,
-                        n.title,
-                        n.type,
-                        n.usecase,
-                        n.status,
-                        n.tags_json,
-                        n.up_json,
-                        c.header_breadcrumb,
-                        c.body,
-                        1.0 AS base_score
-                    FROM chunks c
-                    INNER JOIN notes n ON n.path = c.path
-                    WHERE ({clauses})
-                    LIMIT @candidateLimit;
-                    """;
-                cmd.Parameters.AddWithValue("@candidateLimit", candidateLimit);
-
-                await ReadCandidatesAsync(cmd, rawLexical, ct).ConfigureAwait(false);
+                lexicalSw.Stop();
             }
-            else if (hasAnyFilterCriteria)
-            {
-                await using SqliteCommand cmd = connection.CreateCommand();
-                cmd.CommandText = """
-                    SELECT
-                        c.path,
-                        n.title,
-                        n.type,
-                        n.usecase,
-                        n.status,
-                        n.tags_json,
-                        n.up_json,
-                        c.header_breadcrumb,
-                        c.body,
-                        1.0 AS base_score
-                    FROM chunks c
-                    INNER JOIN notes n ON n.path = c.path;
-                    """;
-
-                await ReadCandidatesAsync(cmd, rawLexical, ct).ConfigureAwait(false);
-            }
-
-            foreach (RawCandidate raw in rawLexical)
-            {
-                ct.ThrowIfCancellationRequested();
-
-                if (!candidateMap.TryGetValue(raw.Path, out CandidateState? state))
-                {
-                    state = CreateCandidateState(raw);
-                    state.LexicalScore = raw.BaseScore;
-                    candidateMap[raw.Path] = state;
-                }
-                else if (raw.BaseScore > state.LexicalScore)
-                {
-                    state.LexicalScore = raw.BaseScore;
-                    state.HeaderBreadcrumb = raw.HeaderBreadcrumb;
-                    state.Body = raw.Body;
-                }
-            }
-
-            lexicalRanked = candidateMap.Values
-                .OrderByDescending(static x => x.LexicalScore)
-                .ThenBy(static x => x.Path, StringComparer.Ordinal)
-                .Select(static x => new RankedCandidate(x.Path, x.LexicalScore))
-                .ToList();
         }
 
-        lexicalSw.Stop();
-
-        var vectorSw = Stopwatch.StartNew();
+        var vectorSw = new Stopwatch();
         var vectorRanked = new List<RankedCandidate>();
         bool vectorUsed = false;
 
         if (canAttemptVector)
         {
-            int vectorRowCount = await CountRowsAsync(connection, transaction: null, "chunk_vectors", ct)
-                .ConfigureAwait(false);
-
-            if (vectorRowCount > 0)
+            vectorSw.Start();
+            try
             {
-                float[] queryVector = await _embeddingClient!.EmbedQueryAsync(query.Text, ct).ConfigureAwait(false);
+                int vectorRowCount = await CountRowsAsync(connection, transaction: null, "chunk_vectors", ct)
+                    .ConfigureAwait(false);
 
-                if (queryVector.Length > 0)
+                if (vectorRowCount > 0)
                 {
-                    vectorUsed = true;
-                    var bestVectorByPath = new Dictionary<string, (double Score, RawCandidate Raw)>(StringComparer.Ordinal);
+                    float[] queryVector = await _embeddingClient!.EmbedQueryAsync(query.Text, ct).ConfigureAwait(false);
 
-                    await using SqliteCommand vecCmd = connection.CreateCommand();
-                    vecCmd.CommandText = """
-                        SELECT
-                            c.path,
-                            n.title,
-                            n.type,
-                            n.usecase,
-                            n.status,
-                            n.tags_json,
-                            n.up_json,
-                            c.header_breadcrumb,
-                            c.body,
-                            cv.embedding
-                        FROM chunk_vectors cv
-                        INNER JOIN chunks c ON c.chunk_id = cv.chunk_id
-                        INNER JOIN notes n ON n.path = c.path;
-                        """;
-
-                    await using SqliteDataReader reader = await vecCmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
-                    while (await reader.ReadAsync(ct).ConfigureAwait(false))
+                    if (queryVector.Length > 0)
                     {
-                        ct.ThrowIfCancellationRequested();
+                        vectorUsed = true;
+                        var bestVectorByPath = new Dictionary<string, (double Score, RawCandidate Raw)>(StringComparer.Ordinal);
 
-                        byte[] blob = (byte[])reader.GetValue(9);
-                        if (blob.Length == 0 || blob.Length % sizeof(float) != 0)
+                        await using SqliteCommand vecCmd = connection.CreateCommand();
+                        vecCmd.CommandText = """
+                            SELECT
+                                c.path,
+                                n.title,
+                                n.type,
+                                n.usecase,
+                                n.status,
+                                n.tags_json,
+                                n.up_json,
+                                c.header_breadcrumb,
+                                c.body,
+                                cv.embedding
+                            FROM chunk_vectors cv
+                            INNER JOIN chunks c ON c.chunk_id = cv.chunk_id
+                            INNER JOIN notes n ON n.path = c.path;
+                            """;
+
+                        await using SqliteDataReader reader = await vecCmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
+                        while (await reader.ReadAsync(ct).ConfigureAwait(false))
                         {
-                            continue;
-                        }
-
-                        float[] docVector = SimdCosine.FromBytes(blob);
-                        if (docVector.Length != queryVector.Length)
-                        {
-                            continue;
-                        }
-
-                        double cos = SimdCosine.CosineNormalized(queryVector, docVector);
-                        string path = reader.GetString(0);
-
-                        if (!bestVectorByPath.TryGetValue(path, out (double Score, RawCandidate Raw) existingVec) ||
-                            cos > existingVec.Score)
-                        {
-                            var raw = new RawCandidate(
-                                Path: path,
-                                Title: reader.GetString(1),
-                                Type: reader.GetString(2),
-                                Usecase: reader.GetString(3),
-                                Status: reader.GetString(4),
-                                TagsJson: reader.GetString(5),
-                                UpJson: reader.GetString(6),
-                                HeaderBreadcrumb: reader.GetString(7),
-                                Body: reader.GetString(8),
-                                BaseScore: cos);
-
-                            bestVectorByPath[path] = (cos, raw);
-                        }
-                    }
-
-                    foreach (KeyValuePair<string, (double Score, RawCandidate Raw)> kvp in bestVectorByPath)
-                    {
-                        if (!candidateMap.TryGetValue(kvp.Key, out CandidateState? state))
-                        {
-                            state = CreateCandidateState(kvp.Value.Raw);
-                            state.VectorScore = kvp.Value.Score;
-                            candidateMap[kvp.Key] = state;
-                        }
-                        else
-                        {
-                            state.VectorScore = kvp.Value.Score;
-                            if (state.Body.Length == 0)
+                            ct.ThrowIfCancellationRequested();
+                            
+                            if (reader.IsDBNull(9) || reader.GetValue(9) is not byte[] blob || blob.Length == 0 || blob.Length % sizeof(float) != 0)
                             {
-                                state.HeaderBreadcrumb = kvp.Value.Raw.HeaderBreadcrumb;
-                                state.Body = kvp.Value.Raw.Body;
+                                continue;
+                            }
+
+                            float[] docVector = SimdCosine.FromBytes(blob);
+                            if (docVector.Length != queryVector.Length)
+                            {
+                                continue;
+                            }
+
+                            double cos = SimdCosine.CosineNormalized(queryVector, docVector);
+                            string path = reader.GetString(0);
+
+                            if (!bestVectorByPath.TryGetValue(path, out (double Score, RawCandidate Raw) existingVec) ||
+                                cos > existingVec.Score)
+                            {
+                                var raw = new RawCandidate(
+                                    Path: path,
+                                    Title: reader.GetString(1),
+                                    Type: reader.GetString(2),
+                                    Usecase: reader.GetString(3),
+                                    Status: reader.GetString(4),
+                                    TagsJson: reader.GetString(5),
+                                    UpJson: reader.GetString(6),
+                                    HeaderBreadcrumb: reader.GetString(7),
+                                    Body: reader.GetString(8),
+                                    BaseScore: cos);
+
+                                bestVectorByPath[path] = (cos, raw);
                             }
                         }
-                    }
 
-                    vectorRanked = bestVectorByPath.Values
-                        .OrderByDescending(static x => x.Score)
-                        .ThenBy(static x => x.Raw.Path, StringComparer.Ordinal)
-                        .Take(candidateLimit)
-                        .Select(static x => new RankedCandidate(x.Raw.Path, x.Score))
-                        .ToList();
+                        foreach (KeyValuePair<string, (double Score, RawCandidate Raw)> kvp in bestVectorByPath)
+                        {
+                            if (!candidateMap.TryGetValue(kvp.Key, out CandidateState? state))
+                            {
+                                state = CreateCandidateState(kvp.Value.Raw);
+                                state.VectorScore = kvp.Value.Score;
+                                candidateMap[kvp.Key] = state;
+                            }
+                            else
+                            {
+                                state.VectorScore = kvp.Value.Score;
+                                if (state.Body.Length == 0)
+                                {
+                                    state.HeaderBreadcrumb = kvp.Value.Raw.HeaderBreadcrumb;
+                                    state.Body = kvp.Value.Raw.Body;
+                                }
+                            }
+                        }
+
+                        vectorRanked = bestVectorByPath.Values
+                            .OrderByDescending(static x => x.Score)
+                            .ThenBy(static x => x.Raw.Path, StringComparer.Ordinal)
+                            .Take(candidateLimit)
+                            .Select(static x => new RankedCandidate(x.Raw.Path, x.Score))
+                            .ToList();
+                    }
                 }
             }
+            finally
+            {
+                vectorSw.Stop();
+            }
         }
-
-        vectorSw.Stop();
 
         var directCandidates = new List<CandidateState>();
         if (useLexical && vectorUsed)
@@ -810,18 +821,22 @@ public sealed class SqliteVaultIndex : IVaultIndex, IDisposable
                 .Take(3)
                 .Select(static c => c.Path)
                 .ToList();
-            HashSet<string> directPathSet = directCandidates
-                .Select(static c => c.Path)
-                .ToHashSet(StringComparer.Ordinal);
+            HashSet<string> seedSet = seedPaths.ToHashSet(StringComparer.Ordinal);
+            var directByPath = new Dictionary<string, CandidateState>(directCandidates.Count, StringComparer.Ordinal);
+            foreach (CandidateState direct in directCandidates)
+            {
+                directByPath.TryAdd(direct.Path, direct);
+            }
 
             List<(string NeighborPath, double Weight)> neighbors = await FetchOneHopNeighborsAsync(
                 connection,
                 seedPaths,
-                directPathSet,
+                seedSet,
                 ct).ConfigureAwait(false);
 
             if (neighbors.Count > 0)
             {
+                double top3Floor = directCandidates.Take(3).Min(static c => c.Score);
                 double minDirectScore = directCandidates.Min(static c => c.Score);
                 double floor = minDirectScore > 0.0 ? minDirectScore * 0.5 : 0.001;
                 double maxEdgeWeight = neighbors.Max(static n => n.Weight);
@@ -830,20 +845,38 @@ public sealed class SqliteVaultIndex : IVaultIndex, IDisposable
                     maxEdgeWeight = 1.0;
                 }
 
+                List<string> missingNeighborPaths = neighbors
+                    .Select(static n => n.NeighborPath)
+                    .Where(path => !directByPath.ContainsKey(path))
+                    .ToList();
+
                 Dictionary<string, RawCandidate> neighborNotes = await FetchNotesByPathsAsync(
                     connection,
-                    neighbors.Select(static n => n.NeighborPath).ToList(),
+                    missingNeighborPaths,
                     ct).ConfigureAwait(false);
 
                 foreach ((string neighborPath, double weight) in neighbors)
                 {
+                    double normalizedWeight = Math.Clamp(weight / maxEdgeWeight, 0.01, 1.0);
+
+                    if (directByPath.TryGetValue(neighborPath, out CandidateState? existingDirect))
+                    {
+                        if (existingDirect.Score < top3Floor)
+                        {
+                            double gap = top3Floor - existingDirect.Score;
+                            double boosted = existingDirect.Score + (gap * 0.75 * normalizedWeight);
+                            existingDirect.Score = Math.Min(top3Floor - 1e-6, boosted);
+                        }
+
+                        continue;
+                    }
+
                     if (!neighborNotes.TryGetValue(neighborPath, out RawCandidate? raw))
                     {
                         continue;
                     }
 
                     CandidateState neighborState = CreateCandidateState(raw);
-                    double normalizedWeight = Math.Clamp(weight / maxEdgeWeight, 0.01, 1.0);
                     neighborState.Score = floor * normalizedWeight;
                     neighborState.IsDirectHit = false;
                     allCandidates.Add(neighborState);

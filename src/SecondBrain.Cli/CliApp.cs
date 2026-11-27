@@ -10,9 +10,11 @@ using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
+using SecondBrain.Core.Eval;
 using SecondBrain.Core.Model;
 using SecondBrain.Core.Ports;
 using SecondBrain.Infrastructure.Capture;
+using SecondBrain.Infrastructure.Eval;
 using SecondBrain.Infrastructure.Indexing;
 using SecondBrain.Infrastructure.Ollama;
 using SecondBrain.Infrastructure.Vault;
@@ -127,6 +129,7 @@ public sealed partial class CliApp(TextWriter stdout, TextWriter stderr, TimePro
             "search" => await RunSearchAsync(args, remainingStartIndex, vaultOption, vaultProvided, json, helpRequested, ct).ConfigureAwait(false),
             "show" => await RunShowAsync(args, remainingStartIndex, vaultOption, vaultProvided, json, helpRequested, ct).ConfigureAwait(false),
             "rebuild-index" => await RunRebuildIndexAsync(args, remainingStartIndex, vaultOption, vaultProvided, json, helpRequested, ct).ConfigureAwait(false),
+            "eval" => await RunEvalAsync(args, remainingStartIndex, vaultOption, vaultProvided, json, helpRequested, ct).ConfigureAwait(false),
             _ => await UnknownCommandAsync(command, ct).ConfigureAwait(false)
         };
     }
@@ -996,6 +999,226 @@ public sealed partial class CliApp(TextWriter stdout, TextWriter stderr, TimePro
         return 0;
     }
 
+    private async Task<int> RunEvalAsync(
+        string[] args,
+        int startIndex,
+        string? vaultOption,
+        bool vaultProvided,
+        bool json,
+        bool helpRequested,
+        CancellationToken ct)
+    {
+        string? goldOption = null;
+        var live = false;
+        var compareMode = false;
+        string? compareA = null;
+        string? compareB = null;
+        var endOfOptions = false;
+
+        for (var i = startIndex; i < args.Length; i++)
+        {
+            var arg = args[i];
+            if (!endOfOptions && arg == "--")
+            {
+                endOfOptions = true;
+                continue;
+            }
+
+            if (!endOfOptions && arg is "--help" or "-h")
+            {
+                helpRequested = true;
+                continue;
+            }
+
+            if (!endOfOptions && TryParseGlobalFlag(args, ref i, ref vaultOption, ref vaultProvided, ref json, out var flagError))
+            {
+                if (flagError is not null)
+                {
+                    await _stderr.WriteLineAsync(flagError.AsMemory(), ct).ConfigureAwait(false);
+                    return 1;
+                }
+
+                continue;
+            }
+
+            if (!endOfOptions && TryParseValueFlag(args, ref i, "--gold", out var goldVal, out var goldErr))
+            {
+                if (goldErr is not null)
+                {
+                    await _stderr.WriteLineAsync(goldErr.AsMemory(), ct).ConfigureAwait(false);
+                    return 1;
+                }
+
+                if (string.IsNullOrWhiteSpace(goldVal))
+                {
+                    await _stderr.WriteLineAsync("Option '--gold' requires a non-empty directory path.".AsMemory(), ct).ConfigureAwait(false);
+                    return 1;
+                }
+
+                goldOption = goldVal;
+                continue;
+            }
+
+            if (!endOfOptions && arg == "--live")
+            {
+                live = true;
+                continue;
+            }
+
+            if (!endOfOptions && arg == "--compare")
+            {
+                if (i + 2 >= args.Length)
+                {
+                    await _stderr.WriteLineAsync("Option '--compare' requires two report file paths: <a.json> <b.json>.".AsMemory(), ct).ConfigureAwait(false);
+                    return 1;
+                }
+
+                compareA = args[++i];
+                compareB = args[++i];
+                if (string.IsNullOrWhiteSpace(compareA) || string.IsNullOrWhiteSpace(compareB))
+                {
+                    await _stderr.WriteLineAsync("Option '--compare' requires two non-empty report file paths.".AsMemory(), ct).ConfigureAwait(false);
+                    return 1;
+                }
+
+                compareMode = true;
+                continue;
+            }
+
+            if (!endOfOptions && arg.StartsWith('-') && arg.Length > 1)
+            {
+                await _stderr.WriteLineAsync($"Unknown option '{arg}' for 'eval'.".AsMemory(), ct).ConfigureAwait(false);
+                return 1;
+            }
+
+            await _stderr.WriteLineAsync($"Unexpected argument '{arg}' for 'eval'.".AsMemory(), ct).ConfigureAwait(false);
+            return 1;
+        }
+
+        if (helpRequested)
+        {
+            await WriteHelpAsync(ct).ConfigureAwait(false);
+            return 0;
+        }
+
+        if (!TryResolveVaultPath(vaultOption, vaultProvided, out var fullVaultPath, out var pathError))
+        {
+            await _stderr.WriteLineAsync((pathError ?? "Invalid vault path.").AsMemory(), ct).ConfigureAwait(false);
+            return 1;
+        }
+
+        if (compareMode)
+        {
+            var compareRunner = new LinkEvalRunner(fullVaultPath, Array.Empty<NoteDocument>(), timeProvider: _timeProvider);
+            string comparisonMarkdown;
+            try
+            {
+                comparisonMarkdown = await compareRunner.CompareAsync(compareA!, compareB!, ct).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException or InvalidDataException or JsonException or IOException or ArgumentException)
+            {
+                await _stderr.WriteLineAsync($"Eval comparison failed: {ex.Message}".AsMemory(), ct).ConfigureAwait(false);
+                return 1;
+            }
+
+            if (json)
+            {
+                await WriteJsonAsync(
+                    new EvalCompareOutput(
+                        ReportA: Path.GetFullPath(compareA!),
+                        ReportB: Path.GetFullPath(compareB!),
+                        ComparisonMarkdown: comparisonMarkdown),
+                    ct).ConfigureAwait(false);
+            }
+            else
+            {
+                await _stdout.WriteLineAsync(comparisonMarkdown.AsMemory(), ct).ConfigureAwait(false);
+            }
+
+            return 0;
+        }
+
+        if (!Directory.Exists(fullVaultPath))
+        {
+            await _stderr.WriteLineAsync($"Vault directory does not exist: {fullVaultPath}".AsMemory(), ct).ConfigureAwait(false);
+            return 1;
+        }
+
+        IReadOnlyList<NoteDocument> corpus;
+        IReadOnlyList<LinkEvalCase> linkCases;
+        try
+        {
+            string goldDirectory = GoldDatasetLoader.ResolveGoldDirectory(goldOption);
+            corpus = GoldDatasetLoader.LoadCorpus(Path.Combine(goldDirectory, "corpus.yaml"));
+            linkCases = GoldDatasetLoader.LoadLinkCases(Path.Combine(goldDirectory, "links.yaml"));
+        }
+        catch (Exception ex) when (ex is DirectoryNotFoundException or FileNotFoundException or InvalidDataException or IOException)
+        {
+            await _stderr.WriteLineAsync($"Failed to load gold dataset: {ex.Message}".AsMemory(), ct).ConfigureAwait(false);
+            return 1;
+        }
+
+        HttpClient? httpClient = null;
+        IEmbeddingClient? embeddingClient = null;
+        IChatRouter? chatRouter = null;
+        IReadOnlyList<AblationConfig> configs;
+
+        if (live)
+        {
+            var ollamaBaseUrl = Environment.GetEnvironmentVariable("SECONDBRAIN_OLLAMA_URL");
+            var ollamaOptions = string.IsNullOrWhiteSpace(ollamaBaseUrl)
+                ? new OllamaOptions()
+                : new OllamaOptions(BaseUrl: ollamaBaseUrl);
+
+            httpClient = _ollamaHandler is not null
+                ? new HttpClient(_ollamaHandler, disposeHandler: false)
+                : new HttpClient();
+            httpClient.Timeout = TimeSpan.FromSeconds(120);
+
+            embeddingClient = new OllamaEmbeddingClient(httpClient, ollamaOptions);
+            chatRouter = new OllamaChatRouter(httpClient, ollamaOptions);
+            configs = LinkEvalRunner.StandardAblationConfigs;
+        }
+        else
+        {
+            configs = [LinkEvalRunner.StandardAblationConfigs[0]];
+        }
+
+        try
+        {
+            var runner = new LinkEvalRunner(fullVaultPath, corpus, embeddingClient, chatRouter, _timeProvider);
+            _ = await runner.RunAsync(linkCases, configs, live, ct).ConfigureAwait(false);
+
+            LinkEvalReport report = runner.LastReport
+                ?? throw new InvalidOperationException("LinkEvalRunner finished without producing a report.");
+
+            if (json)
+            {
+                await WriteJsonAsync(report, ct).ConfigureAwait(false);
+            }
+            else
+            {
+                string markdown = LinkEvalRunner.FormatReportMarkdown(report);
+                await _stdout.WriteLineAsync(markdown.AsMemory(), ct).ConfigureAwait(false);
+            }
+
+            return 0;
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex) when (ex is HttpRequestException or InvalidOperationException or TimeoutException or TaskCanceledException or JsonException or IOException)
+        {
+            await _stderr.WriteLineAsync($"Eval run failed: {ex.Message}".AsMemory(), ct).ConfigureAwait(false);
+            return 1;
+        }
+        finally
+        {
+            httpClient?.Dispose();
+        }
+    }
+
     private async Task<int> UnknownCommandAsync(string command, CancellationToken ct)
     {
         await _stderr.WriteLineAsync($"Unknown command '{command}'. Run 'help' to see available commands.".AsMemory(), ct).ConfigureAwait(false);
@@ -1043,6 +1266,7 @@ public sealed partial class CliApp(TextWriter stdout, TextWriter stderr, TimePro
               search <query...>             Search notes (--limit <n>, --tags <csv>, --type <NoteType>, --prefix <path>)
               show <relativePath>           Print note frontmatter and body
               rebuild-index                 Rebuild SQLite index from vault notes
+              eval                          Run link evaluation (--gold <dir>, --live, --compare <a.json> <b.json>)
 
             Common Options:
               --vault <path>                Vault directory (default: SECONDBRAIN_VAULT or current directory)
@@ -1230,4 +1454,9 @@ public sealed partial class CliApp(TextWriter stdout, TextWriter stderr, TimePro
     private sealed record RebuildIndexOutput(
         int Chunks,
         DateTimeOffset BuiltAt);
+
+    private sealed record EvalCompareOutput(
+        string ReportA,
+        string ReportB,
+        string ComparisonMarkdown);
 }

@@ -1,0 +1,320 @@
+﻿cases:
+  - id: link-01
+    input: |
+      Заметил на практике: если зашивать YAML-шапку и длинный список хэштегов прямо в тело фрагмента перед подсчётом эмбеддинга, вектор начинает реагировать на совпадение рубрик, а не на смысл абзаца. Из-за этого совсем разнородные записи с общим тегом лезут вверх при поиске; фильтровать по рубрикам нужно отдельно на уровне SQL, оставляя в чанке лишь заголовок и живой текст.
+    recipe_id: insight
+    gold:
+      related:
+        - 40_Insights/chunking-po-zagolovkam-markdown.md
+        - 80_Decisions/vybor-bge-m3.md
+      up:
+        - 90_Meta/Maps/arkhitektura-secondbrain.md
+      hard_negatives: []
+      duplicate_of: 40_Insights/tegi-bez-vnedreniya-v-chunk.md
+      mentions: {}
+      action: merge
+
+  - id: link-02
+    input: |
+      Чтобы нейросеть не выдумывала несуществующие файлы при автолинковке, ей нельзя давать полную свободу писать ссылки по памяти. Сначала поисковик отбирает ограниченный набор реальных заметок из хранилища, а модель лишь выбирает подходящие связи из этого закрытого перечня; всё, чего не было в списке кандидатов, C#-валидатор обязан жёстко отсекать.
+    recipe_id: insight
+    gold:
+      related:
+        - 80_Decisions/structured-output-vmesto-tool-calling.md
+        - 10_Projects/second-brain-engine.md
+      up:
+        - 90_Meta/Maps/arkhitektura-secondbrain.md
+      hard_negatives: []
+      duplicate_of: 40_Insights/closed-world-linking.md
+      mentions: {}
+      action: merge
+
+  - id: link-03
+    input: |
+      Постоянное перепрыгивание между кодом и чатами выматывает память, поэтому утренние полтора часа до общих звонков лучше наглухо закрывать от уведомлений и почты. Один такой спокойный полуторачасовой заход без прерываний продвигает сложную задачу сильнее, чем восемь часов с дёрганьем каждые десять минут.
+    recipe_id: insight
+    gold:
+      related:
+        - 40_Insights/udalenka-ekonomiya-vremeni.md
+      up:
+        - 90_Meta/Maps/produktivnost-i-rabota.md
+      hard_negatives: []
+      duplicate_of: 40_Insights/glubokaya-rabota-bloki-vremeni.md
+      mentions: {}
+      action: merge
+
+  - id: link-04
+    input: |
+      Встроенный полнотекстовый индекс SQLite в русской речи спотыкается о падежные окончания: ищешь слово в именительном падеже, а документы с косвенной формой пролетают мимо. Придётся на этапе подготовки текста в .NET предварительно приводить слова к основе через русский Snowball-стеммер перед записью в таблицу индекса и при парсинге запроса.
+    recipe_id: insight
+    gold:
+      related:
+        - 30_Resources/gibridnyy-poisk-bm25-i-vektory.md
+        - 80_Decisions/gibridnyy-poisk-rrf.md
+      up:
+        - 90_Meta/Maps/arkhitektura-secondbrain.md
+      hard_negatives: []
+      duplicate_of: 40_Insights/morfologiya-fts5-snowball.md
+      mentions: {}
+      action: merge
+
+  - id: link-05
+    input: |
+      Если резать длинные документы тупо по фиксированному числу символов, куски обрываются на полуслове и теряют тему. Гораздо чище делить Markdown-заметку по границам разделов ## и ###, приклеивая в начало каждого блока цепочку родительских заголовков, а лимит токенов применять только к слишком раздутым секциям.
+    recipe_id: insight
+    gold:
+      related:
+        - 40_Insights/tegi-bez-vnedreniya-v-chunk.md
+      up:
+        - 90_Meta/Maps/arkhitektura-secondbrain.md
+      hard_negatives: []
+      duplicate_of: 40_Insights/chunking-po-zagolovkam-markdown.md
+      mentions: {}
+      action: merge
+
+  - id: link-06
+    input: |
+      Разбирая поздний период Витгенштейна, важно зафиксировать, что смысл слова больше не привязан к жёсткой логической таблице истинности, а рождается в живых языковых играх. Понимание выражения зависит от правил конкретной речевой практики и социального употребления, а не от сопоставления с изолированным объектом.
+    recipe_id: insight
+    gold:
+      related:
+        - 30_Resources/vitgenshteyn-pozdniy.md
+        - 30_Resources/yazykovye-igry-i-pragmatika.md
+      up:
+        - 90_Meta/Maps/filosofiya-yazyka.md
+      hard_negatives:
+        - 30_Resources/vitgenshteyn-ranniy.md
+      duplicate_of: null
+      mentions:
+        Витгенштейна: 30_Resources/vitgenshteyn-pozdniy.md
+      action: new
+
+  - id: link-07
+    input: |
+      Чтобы новички в распределённой команде не выпадали из контекста без офисных разговоров, вводим обязательные парные ревью кода по вторникам и короткие неформальные кофе-созвоны без повестки. Практика должна вернуть живой обмен опытом, который пропадает в дистанционном формате.
+    recipe_id: insight
+    gold:
+      related:
+        - 40_Insights/udalenka-izolyatsiya.md
+      up:
+        - 90_Meta/Maps/produktivnost-i-rabota.md
+      hard_negatives:
+        - 40_Insights/udalenka-ekonomiya-vremeni.md
+      duplicate_of: null
+      mentions: {}
+      action: new
+
+  - id: link-08
+    input: |
+      Перенёс сложный рефакторинг и проектирование схем хранения на утреннее окно с 8:30 до 10:00, пока не начались дейлики: отсутствие дороги в офис освобождает этот утренний ресурс целиком под задачи с высокой нагрузкой на внимание.
+    recipe_id: insight
+    gold:
+      related:
+        - 40_Insights/udalenka-ekonomiya-vremeni.md
+        - 40_Insights/glubokaya-rabota-bloki-vremeni.md
+      up:
+        - 90_Meta/Maps/produktivnost-i-rabota.md
+      hard_negatives:
+        - 40_Insights/udalenka-izolyatsiya.md
+      duplicate_of: null
+      mentions: {}
+      action: new
+
+  - id: link-09
+    input: |
+      Проектирование строгих JSON-контрактов и проверяемых схем данных перекликается с тем, как ранний Витгенштейн строил формальную онтологию фактов в «Логико-философском трактате»: допустимы только чётко типизированные утверждения, а неформализуемое остаётся вне модели.
+    recipe_id: insight
+    gold:
+      related:
+        - 30_Resources/vitgenshteyn-ranniy.md
+      up:
+        - 90_Meta/Maps/filosofiya-yazyka.md
+      hard_negatives:
+        - 30_Resources/vitgenshteyn-pozdniy.md
+      duplicate_of: null
+      mentions:
+        Витгенштейн: 30_Resources/vitgenshteyn-ranniy.md
+      action: new
+
+  - id: link-10
+    input: |
+      Замер задержек CLI показал, что при одновременной фоновой переиндексации и поиске достаточно выставить `busy_timeout=5000` и периодический `wal_autocheckpoint` в локальном SQLite, чтобы запросы пользователя шли без единого ожидания блокировки и без отдельного векторного демона.
+    recipe_id: insight
+    gold:
+      related:
+        - 40_Insights/sqlite-wal-lokalnyy-poisk.md
+        - 80_Decisions/otkaz-ot-qdrant.md
+      up:
+        - 90_Meta/Maps/arkhitektura-secondbrain.md
+      hard_negatives:
+        - 30_Resources/postgres-wal-replikatsiya.md
+      duplicate_of: null
+      mentions: {}
+      action: new
+
+  - id: link-11
+    input: |
+      После инцидента с переполнением диска на мастере PostgreSQL добавляем алерт в Prometheus по метрике задержки pg_stat_replication и жёсткий предел max_slot_wal_keep_size. Так упавшая реплика не заставит основной узел бесконечно копить непереданные журналы транзакций.
+    recipe_id: insight
+    gold:
+      related:
+        - 30_Resources/postgres-wal-replikatsiya.md
+      up: []
+      hard_negatives:
+        - 40_Insights/sqlite-wal-lokalnyy-poisk.md
+      duplicate_of: null
+      mentions: {}
+      action: new
+
+  - id: link-12
+    input: |
+      Чтобы не сжигать видеопамять ноутбука при повторных пересборках базы, неизменённые разделы заметок нужно пропускать мимо нейросети, доставая готовые векторы по криптографическому отпечатку содержимого и имени модели. Пересчёт запускается лишь при правке текста раздела.
+    recipe_id: insight
+    gold:
+      related:
+        - 40_Insights/kesh-embeddingov-v-sqlite.md
+        - 80_Decisions/vybor-bge-m3.md
+      up:
+        - 90_Meta/Maps/arkhitektura-secondbrain.md
+      hard_negatives:
+        - 30_Resources/http-kesh-cdn-zagolovki.md
+      duplicate_of: null
+      mentions: {}
+      action: new
+
+  - id: link-13
+    input: |
+      Вчерашний разбор просадки cache hit ratio в Cloudflare показал, что маркетинговые query-параметры utm_source в URL плодят тысячи лишних ключей. Нужно вырезать трекинговые параметры в правиле нормализации на прокси-слое, не трогая условную валидацию по ETag.
+    recipe_id: insight
+    gold:
+      related:
+        - 30_Resources/http-kesh-cdn-zagolovki.md
+      up: []
+      hard_negatives:
+        - 40_Insights/kesh-embeddingov-v-sqlite.md
+      duplicate_of: null
+      mentions: {}
+      action: new
+
+  - id: link-14
+    input: |
+      На встрече по срокам Иван Петров подтвердил, что для Проекта Альфа главным приоритетом до релиза остаётся полная локальная работа поиска без облачных вызовов. Соответственно, контракты API нужно зафиксировать на этой неделе.
+    recipe_id: insight
+    gold:
+      related:
+        - 50_People/ivan-petrov.md
+        - 10_Projects/proekt-alfa.md
+      up:
+        - 90_Meta/Maps/produktivnost-i-rabota.md
+      hard_negatives: []
+      duplicate_of: null
+      mentions:
+        Иван Петров: 50_People/ivan-petrov.md
+        Проекта Альфа: 10_Projects/proekt-alfa.md
+      action: new
+
+  - id: link-15
+    input: |
+      Анна Соколова завершила сравнительный прогон на русскоязычных заметках и показала, что bge-m3 уверенно обходит компактные англоязычные модели по метрике Recall@10. При этом для 8 ГБ ноутбука эмбеддинг-батч лучше запускать отдельным проходом.
+    recipe_id: insight
+    gold:
+      related:
+        - 50_People/anna-sokolova.md
+        - 80_Decisions/vybor-bge-m3.md
+        - 40_Insights/kesh-embeddingov-v-sqlite.md
+      up:
+        - 90_Meta/Maps/arkhitektura-secondbrain.md
+      hard_negatives: []
+      duplicate_of: null
+      mentions:
+        Анна Соколова: 50_People/anna-sokolova.md
+        bge-m3: 80_Decisions/vybor-bge-m3.md
+      action: new
+
+  - id: link-16
+    input: |
+      В новой сборке движка SecondBrain окончательно вырезали зависимость от контейнера Qdrant, чтобы не усложнять установку на Windows. Все векторы теперь лежат рядом с полнотекстовым индексом в одном файле базы данных.
+    recipe_id: insight
+    gold:
+      related:
+        - 10_Projects/second-brain-engine.md
+        - 80_Decisions/otkaz-ot-qdrant.md
+        - 40_Insights/sqlite-wal-lokalnyy-poisk.md
+      up:
+        - 90_Meta/Maps/arkhitektura-secondbrain.md
+      hard_negatives: []
+      duplicate_of: null
+      mentions:
+        SecondBrain: 10_Projects/second-brain-engine.md
+        Qdrant: 80_Decisions/otkaz-ot-qdrant.md
+      action: new
+
+  - id: link-17
+    input: |
+      Обсудили с Иваном устойчивость генерации метаданных в SecondBrain: агентные циклы на 7B-модели слишком часто срываются на некорректном формате аргументов. Поэтому оставляем одиночный вызов со строгой JSON-схемой и передаём всю запись файлов в C#.
+    recipe_id: insight
+    gold:
+      related:
+        - 50_People/ivan-petrov.md
+        - 10_Projects/second-brain-engine.md
+        - 80_Decisions/structured-output-vmesto-tool-calling.md
+      up:
+        - 90_Meta/Maps/arkhitektura-secondbrain.md
+      hard_negatives: []
+      duplicate_of: null
+      mentions:
+        Иваном: 50_People/ivan-petrov.md
+        SecondBrain: 10_Projects/second-brain-engine.md
+      action: new
+
+  - id: link-18
+    input: |
+      Для Проекта Альфа Анна Соколова предложила комбинировать BM25 и косинусное сходство через Reciprocal Rank Fusion, а порог слияния дублей дополнительно страховать проверкой зазора между первым и вторым кандидатом. Это снижает долю ложных слияний на коротких технических заметках.
+    recipe_id: insight
+    gold:
+      related:
+        - 10_Projects/proekt-alfa.md
+        - 50_People/anna-sokolova.md
+        - 80_Decisions/gibridnyy-poisk-rrf.md
+        - 40_Insights/dedup-porog-kosinus-i-zazor.md
+      up:
+        - 90_Meta/Maps/arkhitektura-secondbrain.md
+      hard_negatives: []
+      duplicate_of: null
+      mentions:
+        Проекта Альфа: 10_Projects/proekt-alfa.md
+        Анна Соколова: 50_People/anna-sokolova.md
+      action: new
+
+  - id: link-19
+    input: |
+      Поздний Витгенштейн фактически сближает семантику с прагматикой: вне конкретной ситуации общения и фоновых правил участников речевой акт теряет определённость. Поэтому понимание высказывания требует анализа жизненного контекста, а не только словарных определений.
+    recipe_id: insight
+    gold:
+      related:
+        - 30_Resources/vitgenshteyn-pozdniy.md
+        - 30_Resources/yazykovye-igry-i-pragmatika.md
+      up:
+        - 90_Meta/Maps/filosofiya-yazyka.md
+      hard_negatives:
+        - 30_Resources/vitgenshteyn-ranniy.md
+      duplicate_of: null
+      mentions:
+        Витгенштейн: 30_Resources/vitgenshteyn-pozdniy.md
+      action: new
+
+  - id: link-20
+    input: |
+      Эксперименты с абляцией показывают, что объединение точных лексических совпадений BM25 и плотных векторов по ранговой формуле RRF даёт максимальный прирост именно при наличии двухпороговой проверки дедупликации. Если второй кандидат идёт почти вровень с лидером, систему нельзя переводить в автоматическое слияние — безопаснее создать отдельную запись и проставить связь.
+    recipe_id: insight
+    gold:
+      related:
+        - 80_Decisions/gibridnyy-poisk-rrf.md
+        - 40_Insights/dedup-porog-kosinus-i-zazor.md
+        - 30_Resources/gibridnyy-poisk-bm25-i-vektory.md
+      up:
+        - 90_Meta/Maps/arkhitektura-secondbrain.md
+      hard_negatives: []
+      duplicate_of: null
+      mentions: {}
+      action: new

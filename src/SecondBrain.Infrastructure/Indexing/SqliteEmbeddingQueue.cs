@@ -530,10 +530,11 @@ public sealed class SqliteEmbeddingQueue : IEmbeddingQueue, IDisposable
         await using SqliteConnection connection = await OpenConnectionAsync(loadVec0: false, ct).ConfigureAwait(false);
         await using SqliteCommand cmd = connection.CreateCommand();
         cmd.CommandText = """
-            SELECT COUNT(*)
-            FROM embedding_queue
-            WHERE status = 'pending' OR (status = 'failed' AND attempts < @maxAttempts);
-            """;
+                          SELECT COUNT(*)
+                          FROM embedding_queue eq
+                          INNER JOIN chunks c ON c.chunk_id = eq.chunk_id
+                          WHERE eq.status = 'pending' OR (eq.status = 'failed' AND eq.attempts < @maxAttempts);
+                          """;
         cmd.Parameters.AddWithValue("@maxAttempts", MaxAttempts);
 
         object? scalar = await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false);

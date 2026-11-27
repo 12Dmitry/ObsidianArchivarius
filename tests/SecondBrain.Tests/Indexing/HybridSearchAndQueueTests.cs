@@ -32,6 +32,8 @@ public sealed class HybridSearchAndQueueTests : IDisposable
 
     public void Dispose()
     {
+        SqliteConnection.ClearAllPools();
+
         if (Directory.Exists(_tempRoot))
         {
             try
@@ -40,7 +42,7 @@ public sealed class HybridSearchAndQueueTests : IDisposable
             }
             catch (IOException)
             {
-                // Ignore transient cleanup locks from OS file handles.
+                // Fallback for transient OS antivirus/indexer locks.
             }
         }
     }
