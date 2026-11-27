@@ -318,3 +318,329 @@
       duplicate_of: null
       mentions: {}
       action: new
+      
+  # Сценарий: дубликат decision-заметки БЕЗ лексического якоря (слово Qdrant не названо) —
+  # серая зона дедупа по смыслу, FTS почти не помогает.
+  - id: link-21
+    input: |
+      Убрали из проекта отдельную векторную базу: держать контейнер с сетевым демоном ради локальной установки на ноутбук оказалось дороже пользы. Теперь плотные векторы лежат в том же локальном файле, что и полнотекстовый индекс, резервная копия — это копия одного файла, а откаты получаются транзакционными. На масштабе до двадцати тысяч заметок перебор векторов укладывается в миллисекунды.
+    recipe_id: insight
+    gold:
+      related:
+        - 10_Projects/second-brain-engine.md
+        - 40_Insights/sqlite-wal-lokalnyy-poisk.md
+      up:
+        - 90_Meta/Maps/arkhitektura-secondbrain.md
+      hard_negatives: []
+      duplicate_of: 80_Decisions/otkaz-ot-qdrant.md
+      mentions: {}
+      action: merge
+
+  # Сценарий: дубликат resource-заметки (сильный парафраз) + классический
+  # hard negative — заметка про SQLite WAL.
+  - id: link-22
+    input: |
+      Перед переключением читающего трафика на резервный узел дежурный смотрит задержку воспроизведения журнала и статус синхронного подтверждения транзакций. Слоты репликации не дают основному узлу стирать сегменты журнала предзаписи, пока отстающая реплика не вычитала их, поэтому после переполнения диска пришлось ограничить размер слота и добавить алерт по задержке.
+    recipe_id: insight
+    gold:
+      related: []
+      up: []
+      hard_negatives:
+        - 40_Insights/sqlite-wal-lokalnyy-poisk.md
+      duplicate_of: 30_Resources/postgres-wal-replikatsiya.md
+      mentions: {}
+      action: merge
+
+  # Сценарий: НОВАЯ заметка в серой зоне — топически почти совпадает с решением об отказе
+  # от внешнего индекса (косинус ожидаемо 0.7-0.8), но утверждение новое: ловушка для
+  # агрессивного порога слияния (проверка FalseMerges).
+  - id: link-23
+    input: |
+      Прикинул индекс для векторного поиска на десять тысяч заметок: строить графовый HNSW ради такого корпуса бессмысленно, полный проход по нормализованным векторам внутри одной локальной базы укладывается в единицы миллисекунд. Индекс имеет смысл только на сотнях тысяч документов, а до тех пор он лишь усложняет сборку и обновления.
+    recipe_id: insight
+    gold:
+      related:
+        - 80_Decisions/otkaz-ot-qdrant.md
+        - 40_Insights/kesh-embeddingov-v-sqlite.md
+      up:
+        - 90_Meta/Maps/arkhitektura-secondbrain.md
+      hard_negatives: []
+      duplicate_of: null
+      mentions: {}
+      action: new
+
+  # Сценарий: НОВАЯ заметка в серой зоне кластера продуктивности — лексика глубокого
+  # фокуса и когнитивного ресурса совпадает, но практика другая (тайм-боксинг встреч).
+  - id: link-24
+    input: |
+      На командных ретро ввели жёсткое правило: любая дискуссия капится двадцатью пятью минутами с таймером на виду, смена темы перезапускает таймер. Короткие слоты заставляют формулировать суть заранее, а общий когнитивный ресурс не сгорает в многочасовых созвонах. Прерывания и переключения контекста после таких правил стали встречаться заметно реже.
+    recipe_id: insight
+    gold:
+      related:
+        - 40_Insights/glubokaya-rabota-bloki-vremeni.md
+        - 40_Insights/udalenka-ekonomiya-vremeni.md
+      up:
+        - 90_Meta/Maps/produktivnost-i-rabota.md
+      hard_negatives:
+        - 40_Insights/udalenka-izolyatsiya.md
+      duplicate_of: null
+      mentions: {}
+      action: new
+
+  # Сценарий: дубликат PERSON-заметки (повторный захват контакта без имени) — дедуп
+  # вне инсайтов; второй человек с именем Анна как hard negative.
+  - id: link-25
+    input: |
+      Пересеклись с нашим ML-инженером на конференции: она как раз гоняет сравнение моделей векторизации на русскоязычных контрольных наборах, меряет Recall@10 и MRR и настаивает, что на слабых GPU индексацию и генерацию надо разводить по отдельным проходам, иначе веса моделей постоянно выгружаются из памяти.
+    recipe_id: insight
+    gold:
+      related:
+        - 80_Decisions/vybor-bge-m3.md
+        - 10_Projects/proekt-alfa.md
+      up:
+        - 90_Meta/Maps/arkhitektura-secondbrain.md
+      hard_negatives:
+        - 50_People/anna-kuznetsova.md
+      duplicate_of: 50_People/anna-sokolova.md
+      mentions: {}
+      action: merge
+
+  # Сценарий: дубликат инсайта в стиле рассказа от первого лица — слабое лексическое
+  # перекрытие, косинус ожидаемо ниже нижней границы серой зоны (ловля FalseSplits).
+  - id: link-26
+    input: |
+      Команда ушла на полную удалёнку, и я вижу, как это бьёт по младшим: вопросы из коридоров исчезли, каждое мелкое сомнение превратилось в формальный созвон в календаре. Сеньоры выгорают на бесконечных синках, появилось ощущение оторванности от общих целей компании. Хочу ввести ритуалы парного программирования и периодические очные встречи.
+    recipe_id: insight
+    gold:
+      related:
+        - 40_Insights/udalenka-ekonomiya-vremeni.md
+      up:
+        - 90_Meta/Maps/produktivnost-i-rabota.md
+      hard_negatives: []
+      duplicate_of: 40_Insights/udalenka-izolyatsiya.md
+      mentions: {}
+      action: merge
+
+  # Сценарий: дисамбигуация упоминаний — ранний и поздний Витгенштейн в одном вводе;
+  # резолвер обязан развести поверхности по полным названиям заметок.
+  - id: link-27
+    input: |
+      Собираю материал для сравнительной таблицы по эволюции взглядов Витгенштейна: сначала ранний Витгенштейн с картинной теорией языка и атомарными фактами, затем поздний Витгенштейн, у которого значение рождается в языковых играх и социальном употреблении. Перелом между периодами — возвращение к философии в конце двадцатых годов.
+    recipe_id: insight
+    gold:
+      related:
+        - 30_Resources/vitgenshteyn-ranniy.md
+        - 30_Resources/vitgenshteyn-pozdniy.md
+      up:
+        - 90_Meta/Maps/filosofiya-yazyka.md
+      hard_negatives:
+        - 30_Resources/yazykovye-igry-i-pragmatika.md
+      duplicate_of: null
+      mentions:
+        ранний Витгенштейн: 30_Resources/vitgenshteyn-ranniy.md
+        поздний Витгенштейн: 30_Resources/vitgenshteyn-pozdniy.md
+      action: new
+
+  # Сценарий: два человека с именем Анна — полное имя должно попасть в Кузнецову,
+  # а Соколова остаться неразрешённой и не пролезть в related.
+  - id: link-28
+    input: |
+      На ретро Проекта Альфа Анна Кузнецова предложила: до релиза покрыть индексирующий конвейер автоматными QA-сценариями и прогнать все SQLite-тесты на Windows-машинах. Статусы пишем в проектный чат, дополнительные встречи не созываем.
+    recipe_id: insight
+    gold:
+      related:
+        - 10_Projects/proekt-alfa.md
+      up:
+        - 90_Meta/Maps/produktivnost-i-rabota.md
+      hard_negatives:
+        - 50_People/anna-sokolova.md
+      duplicate_of: null
+      mentions:
+        Анна Кузнецова: 50_People/anna-kuznetsova.md
+        Проекта Альфа: 10_Projects/proekt-alfa.md
+      action: new
+
+  # Сценарий: упоминание в дательном падеже (с Анной Соколовой) + латинский термин
+  # nDCG, резолвящийся в англоязычную заметку о метриках.
+  - id: link-29
+    input: |
+      Обсуждали с Анной Соколовой метрику для оценки выдачи: брать нормализованный дисконтированный кумулятивный выигрыш nDCG или Recall@10 на русском контрольном наборе — зависит от того, насколько полный эталонный ранжинг у нас есть.
+    recipe_id: insight
+    gold:
+      related:
+        - 50_People/anna-sokolova.md
+        - 30_Resources/rag-evaluation-ndcg-recall.md
+      up:
+        - 90_Meta/Maps/arkhitektura-secondbrain.md
+      hard_negatives: []
+      duplicate_of: null
+      mentions:
+        Анной Соколовой: 50_People/anna-sokolova.md
+        nDCG: 30_Resources/rag-evaluation-ndcg-recall.md
+      action: new
+
+  # Сценарий: кросс-язычный поиск — ввод целиком русский, целевая заметка целиком
+  # английская; FTS-trigram помочь не может, работает только вектор bge-m3.
+  - id: link-30
+    input: |
+      Собрал мини-гайд по оценке качества поиска для команды: нормированный дисконтированный кумулятивный выигрыш в верхней части списка, средняя обратная величина ранга первого верного ответа и полнота выборки на первых десяти позициях. Структуру взял из английских методичек, проверю на русском корпусе.
+    recipe_id: insight
+    gold:
+      related:
+        - 30_Resources/rag-evaluation-ndcg-recall.md
+        - 30_Resources/gibridnyy-poisk-bm25-i-vektory.md
+      up:
+        - 90_Meta/Maps/arkhitektura-secondbrain.md
+      hard_negatives: []
+      duplicate_of: null
+      mentions: {}
+      action: new
+
+  # Сценарий: пустое золото — сдержанность. Правильный ответ: ни одной related-ссылки;
+  # попутное упоминание "глубокой работы" НЕ должно превращаться в связь.
+  - id: link-31
+    input: |
+      По вечерам начал учиться игре на фортепиано: полчаса гамм после утреннего окна глубокой работы, до-мажор и арпеджио соль-мажора. Левая рука отстаёт от правой, мозг сопротивляется полиритмии, но к третьей неделе постепенно выравнивается.
+    recipe_id: insight
+    gold:
+      related: []
+      up: []
+      hard_negatives:
+        - 40_Insights/glubokaya-rabota-bloki-vremeni.md
+      duplicate_of: null
+      mentions: {}
+      action: new
+
+  # Сценарий: мультидоменный ввод (философия + архитектура) — related должны прийти
+  # из обоих кластеров; поздний Витгенштейн не должен вытеснить релевантное.
+  - id: link-32
+    input: |
+      Аналогия дня: строгая JSON-схема — это картинная теория языка для данных API, в контракт допускается только проверяемое и типизированное. Почти как ранний Витгенштейн с его атомарными фактами, только вместо фактов — поля с валидаторами.
+    recipe_id: insight
+    gold:
+      related:
+        - 30_Resources/vitgenshteyn-ranniy.md
+        - 80_Decisions/structured-output-vmesto-tool-calling.md
+      up:
+        - 90_Meta/Maps/arkhitektura-secondbrain.md
+      hard_negatives:
+        - 30_Resources/vitgenshteyn-pozdniy.md
+      duplicate_of: null
+      mentions:
+        ранний Витгенштейн: 30_Resources/vitgenshteyn-ranniy.md
+      action: new
+
+  # Сценарий: три системы хранения в одной выдаче — Redis vs PostgreSQL vs SQLite;
+  # проверка реранкинга hard negatives в storage-кластере.
+  - id: link-33
+    input: |
+      Оживляли кластер Redis после переполнения диска: включили AOF с fsync раз в секунду, RDB-снимки оставили раз в шесть часов как страховку, репликацию между узлами — штатным механизмом. Добавили алерт по отставанию журнала, чтобы не пропустить следующий инцидент.
+    recipe_id: insight
+    gold:
+      related:
+        - 30_Resources/redis-persistennost-aof-rdb.md
+      up:
+        - 90_Meta/Maps/bazy-dannykh-i-khranenie.md
+      hard_negatives:
+        - 30_Resources/postgres-wal-replikatsiya.md
+        - 40_Insights/sqlite-wal-lokalnyy-poisk.md
+      duplicate_of: null
+      mentions:
+        Redis: 30_Resources/redis-persistennost-aof-rdb.md
+      action: new
+
+  # Сценарий: кэш-кластер в сборе — браузерный кэш vs CDN vs кэш эмбеддингов;
+  # топ-5 почти неизбежно замусорится соседями, фильтр должен отработать.
+  - id: link-34
+    input: |
+      Настроили кэширование для одностраничного приложения: ассеты с хэшем в имени получают Cache-Control immutable на год, сервис-воркер вычищает старые версии кэша после релиза, а точка входа html всегда отдаётся свежей.
+    recipe_id: insight
+    gold:
+      related:
+        - 30_Resources/keshirovanie-v-brauzere.md
+      up: []
+      hard_negatives:
+        - 30_Resources/http-kesh-cdn-zagolovki.md
+        - 40_Insights/kesh-embeddingov-v-sqlite.md
+      duplicate_of: null
+      mentions: {}
+      action: new
+
+  # Сценарий: up-карта новой карты "Базы данных и хранение" + три related из разных
+  # заметок; проверка детекции up и multi-related выдачи.
+  - id: link-35
+    input: |
+      Для нового сервиса рекомендаций выбрали Postgres с физическими репликами под основные данные, а семантический поиск — векторами прямо в основной базе, без отдельного векторного демона. На командном масштабе это дешевле в эксплуатации, а одна транзакция покрывает все данные сразу.
+    recipe_id: insight
+    gold:
+      related:
+        - 30_Resources/postgres-wal-replikatsiya.md
+        - 80_Decisions/otkaz-ot-qdrant.md
+        - 40_Insights/sqlite-wal-lokalnyy-poisk.md
+      up:
+        - 90_Meta/Maps/bazy-dannykh-i-khranenie.md
+      hard_negatives:
+        - 30_Resources/redis-persistennost-aof-rdb.md
+      duplicate_of: null
+      mentions: {}
+      action: new
+
+  # Сценарий: дубликат средиsiblings — ввод дублирует заметку о прагматике, но топ-2
+  # почти наверняка займут прагматика и поздний Витгенштейн с малым зазором;
+  # margin-эвристика уведёт в "new", правильный ответ — merge (стресс для зазора).
+  - id: link-36
+    input: |
+      Перечитывал заметку о прагматике и хочу зафиксировать мысль отдельно: смысл высказывания — это не словарное определение, а результат договорённостей участников в конкретной ситуации. Контекст, намерения говорящего и фоновые конвенции практики дорисовывают смысл, вне ситуации фраза остаётся недоопределённой.
+    recipe_id: insight
+    gold:
+      related:
+        - 30_Resources/vitgenshteyn-pozdniy.md
+      up:
+        - 90_Meta/Maps/filosofiya-yazyka.md
+      hard_negatives:
+        - 30_Resources/vitgenshteyn-ranniy.md
+      duplicate_of: 30_Resources/yazykovye-igry-i-pragmatika.md
+      mentions: {}
+      action: merge
+
+  # Сценарий: 5 gold related — верхняя граница LinkPrecision@5 достижима только тут;
+  # упоминания BM25/RRF/bge-m3 проверяют латинские поверхности.
+  - id: link-37
+    input: |
+      Архитектура поиска устоялась: лексический BM25 и плотные векторы сливаются ранговой формулой RRF, русская морфология для FTS5 закрывается стеммером на стороне C#, эмбеддинги — bge-m3 с кэшем по хэшу, а векторы живут в той же локальной базе, что и полнотекстовый индекс. Отдельно выпишу результаты абляции по сигналам.
+    recipe_id: insight
+    gold:
+      related:
+        - 80_Decisions/gibridnyy-poisk-rrf.md
+        - 80_Decisions/vybor-bge-m3.md
+        - 40_Insights/morfologiya-fts5-snowball.md
+        - 80_Decisions/otkaz-ot-qdrant.md
+        - 30_Resources/gibridnyy-poisk-bm25-i-vektory.md
+      up:
+        - 90_Meta/Maps/arkhitektura-secondbrain.md
+      hard_negatives: []
+      duplicate_of: null
+      mentions:
+        BM25: 30_Resources/gibridnyy-poisk-bm25-i-vektory.md
+        RRF: 80_Decisions/gibridnyy-poisk-rrf.md
+        bge-m3: 80_Decisions/vybor-bge-m3.md
+      action: new
+
+  # Сценарий: путаница LLM vs эмбеддер (обе заметки про "выбор модели") + упоминание
+  # T-lite, резолвящееся в новую многосекционную заметку corpus (34).
+  - id: link-38
+    input: |
+      Поэкспериментировал с альтернативной локальной моделью: квантованный Qwen3-8B держит русские инструкции точнее, чем T-lite, но ломает JSON-схему на списках длиннее пяти элементов. Пока оставляю двухступенчатую схему: извлечение новой моделью, а валидацию схемы и повторный прогон через T-lite.
+    recipe_id: insight
+    gold:
+      related:
+        - 30_Resources/vybor-lokalnoy-llm-tlite.md
+        - 80_Decisions/structured-output-vmesto-tool-calling.md
+      up:
+        - 90_Meta/Maps/arkhitektura-secondbrain.md
+      hard_negatives:
+        - 80_Decisions/vybor-bge-m3.md
+      duplicate_of: null
+      mentions:
+        T-lite: 30_Resources/vybor-lokalnoy-llm-tlite.md
+      action: new

@@ -1,0 +1,253 @@
+{
+  "At": "2026-11-27T22:22:50.5582841+00:00",
+  "Model": "hf.co/t-tech/T-lite-it-2.1-GGUF:Q4_K_M",
+  "Profile": "extract",
+  "PromptPack": "link-eval-v2",
+  "PromptHash": "4d44cc9081a2d586a5f6ac5ad10f38ee9b1768d25eba8bff3c38cce325824662",
+  "EmbedModel": "bge-m3",
+  "Live": true,
+  "CaseCount": 38,
+  "CorpusCount": 34,
+  "Results": [
+    {
+      "Config": {
+        "Name": "L",
+        "Lexical": true,
+        "Vector": false,
+        "Graph": false,
+        "Llm": false,
+        "ChunkTextVariant": "title_header",
+        "CosineThreshold": 0.92,
+        "MarginDelta": 0.03
+      },
+      "Metrics": {
+        "RecallAt10": 0.8572072072072072,
+        "Mrr": 0.9797297297297297,
+        "LinkPrecisionAt5": 0.3,
+        "LinkRecallAt10": 0.5444444444444444,
+        "LinkF1": 0.3868421052631579,
+        "HardNegativeInTop5": 0.47619047619047616,
+        "UpMapAccuracy": 0.6666666666666666,
+        "MentionAccuracy": 0.84,
+        "FalseMerges": 0,
+        "FalseSplits": 10,
+        "OutOfCandidateLinks": 0,
+        "StabilityJaccard": 1,
+        "ArbitrationRate": 0,
+        "P95Ms": 25.9502
+      },
+      "PromptTokens": 0,
+      "PromptHash": "",
+      "RejectedHallucinations": 0
+    },
+    {
+      "Config": {
+        "Name": "V",
+        "Lexical": false,
+        "Vector": true,
+        "Graph": false,
+        "Llm": false,
+        "ChunkTextVariant": "title_header",
+        "CosineThreshold": 0.92,
+        "MarginDelta": 0.03
+      },
+      "Metrics": {
+        "RecallAt10": 0.7815315315315317,
+        "Mrr": 0.972972972972973,
+        "LinkPrecisionAt5": 0.2947368421052632,
+        "LinkRecallAt10": 0.5560185185185185,
+        "LinkF1": 0.3852556207933553,
+        "HardNegativeInTop5": 0.7619047619047619,
+        "UpMapAccuracy": 0.5151515151515151,
+        "MentionAccuracy": 0.84,
+        "FalseMerges": 0,
+        "FalseSplits": 10,
+        "OutOfCandidateLinks": 0,
+        "StabilityJaccard": 1,
+        "ArbitrationRate": 0,
+        "P95Ms": 523.2684
+      },
+      "PromptTokens": 0,
+      "PromptHash": "",
+      "RejectedHallucinations": 0
+    },
+    {
+      "Config": {
+        "Name": "H",
+        "Lexical": true,
+        "Vector": true,
+        "Graph": false,
+        "Llm": false,
+        "ChunkTextVariant": "title_header",
+        "CosineThreshold": 0.92,
+        "MarginDelta": 0.03
+      },
+      "Metrics": {
+        "RecallAt10": 0.8414414414414415,
+        "Mrr": 0.9864864864864865,
+        "LinkPrecisionAt5": 0.3105263157894737,
+        "LinkRecallAt10": 0.5791666666666666,
+        "LinkF1": 0.4042888834113877,
+        "HardNegativeInTop5": 0.6666666666666666,
+        "UpMapAccuracy": 0.5757575757575758,
+        "MentionAccuracy": 0.84,
+        "FalseMerges": 0,
+        "FalseSplits": 10,
+        "OutOfCandidateLinks": 0,
+        "StabilityJaccard": 1,
+        "ArbitrationRate": 0,
+        "P95Ms": 280.6969
+      },
+      "PromptTokens": 0,
+      "PromptHash": "",
+      "RejectedHallucinations": 0
+    },
+    {
+      "Config": {
+        "Name": "H+G",
+        "Lexical": true,
+        "Vector": true,
+        "Graph": true,
+        "Llm": false,
+        "ChunkTextVariant": "title_header",
+        "CosineThreshold": 0.92,
+        "MarginDelta": 0.03
+      },
+      "Metrics": {
+        "RecallAt10": 0.9009009009009008,
+        "Mrr": 0.9864864864864865,
+        "LinkPrecisionAt5": 0.30526315789473685,
+        "LinkRecallAt10": 0.5699074074074074,
+        "LinkF1": 0.3975721803045912,
+        "HardNegativeInTop5": 0.7619047619047619,
+        "UpMapAccuracy": 1,
+        "MentionAccuracy": 0.84,
+        "FalseMerges": 0,
+        "FalseSplits": 10,
+        "OutOfCandidateLinks": 0,
+        "StabilityJaccard": 1,
+        "ArbitrationRate": 0,
+        "P95Ms": 275.8034
+      },
+      "PromptTokens": 0,
+      "PromptHash": "",
+      "RejectedHallucinations": 0
+    },
+    {
+      "Config": {
+        "Name": "H+G+LLM",
+        "Lexical": true,
+        "Vector": true,
+        "Graph": true,
+        "Llm": true,
+        "ChunkTextVariant": "title_header",
+        "CosineThreshold": 0.92,
+        "MarginDelta": 0.03
+      },
+      "Metrics": {
+        "RecallAt10": 0.9009009009009008,
+        "Mrr": 0.9864864864864865,
+        "LinkPrecisionAt5": 0.13564814814814813,
+        "LinkRecallAt10": 0.12962962962962965,
+        "LinkF1": 0.13257061599120937,
+        "HardNegativeInTop5": 0.7619047619047619,
+        "UpMapAccuracy": 0.24242424242424243,
+        "MentionAccuracy": 0.84,
+        "FalseMerges": 0,
+        "FalseSplits": 10,
+        "OutOfCandidateLinks": 0,
+        "StabilityJaccard": 0.9736842105263158,
+        "ArbitrationRate": 0,
+        "P95Ms": 12016.9903
+      },
+      "PromptTokens": 70111,
+      "PromptHash": "4d44cc9081a2d586a5f6ac5ad10f38ee9b1768d25eba8bff3c38cce325824662",
+      "RejectedHallucinations": 0
+    }
+  ],
+  "DedupSweep": [
+    {
+      "Threshold": 0.74,
+      "FalseMerges": 6,
+      "FalseSplits": 6,
+      "F1": 0.4000000000000001
+    },
+    {
+      "Threshold": 0.76,
+      "FalseMerges": 3,
+      "FalseSplits": 7,
+      "F1": 0.37499999999999994
+    },
+    {
+      "Threshold": 0.78,
+      "FalseMerges": 3,
+      "FalseSplits": 8,
+      "F1": 0.26666666666666666
+    },
+    {
+      "Threshold": 0.8,
+      "FalseMerges": 1,
+      "FalseSplits": 10,
+      "F1": 0
+    },
+    {
+      "Threshold": 0.82,
+      "FalseMerges": 1,
+      "FalseSplits": 10,
+      "F1": 0
+    },
+    {
+      "Threshold": 0.84,
+      "FalseMerges": 0,
+      "FalseSplits": 10,
+      "F1": 0
+    },
+    {
+      "Threshold": 0.86,
+      "FalseMerges": 0,
+      "FalseSplits": 10,
+      "F1": 0
+    },
+    {
+      "Threshold": 0.88,
+      "FalseMerges": 0,
+      "FalseSplits": 10,
+      "F1": 0
+    },
+    {
+      "Threshold": 0.9,
+      "FalseMerges": 0,
+      "FalseSplits": 10,
+      "F1": 0
+    },
+    {
+      "Threshold": 0.92,
+      "FalseMerges": 0,
+      "FalseSplits": 10,
+      "F1": 0
+    },
+    {
+      "Threshold": 0.94,
+      "FalseMerges": 0,
+      "FalseSplits": 10,
+      "F1": 0
+    },
+    {
+      "Threshold": 0.96,
+      "FalseMerges": 0,
+      "FalseSplits": 10,
+      "F1": 0
+    }
+  ],
+  "DedupStats": {
+    "MergeCount": 10,
+    "NewCount": 28,
+    "MinMergeCosine": 0.6079365540601804,
+    "MaxMergeCosine": 0.797065140742826,
+    "MaxNewCosine": 0.8223157177903899
+  },
+  "LastReportJsonPath": "C:\\Users\\Dmitry\\RiderProjects\\ObsidianArchivarius\\.brain\\eval\\20261127-222250.json",
+  "LastReportMarkdownPath": "C:\\Users\\Dmitry\\RiderProjects\\ObsidianArchivarius\\.brain\\eval\\20261127-222250.md",
+  "LastTraceLogPath": "C:\\Users\\Dmitry\\RiderProjects\\ObsidianArchivarius\\.brain\\eval\\20261127-222250.trace.log",
+  "LastTraceNdjsonPath": "C:\\Users\\Dmitry\\RiderProjects\\ObsidianArchivarius\\.brain\\eval\\20261127-222250.trace.ndjson"
+}

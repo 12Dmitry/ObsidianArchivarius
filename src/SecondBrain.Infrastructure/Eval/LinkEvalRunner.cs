@@ -17,45 +17,71 @@ using SecondBrain.Core.Eval;
 using SecondBrain.Core.Model;
 using SecondBrain.Core.Ports;
 using SecondBrain.Infrastructure.Indexing;
+using SecondBrain.Infrastructure.Ollama;
 using SecondBrain.Infrastructure.Vault;
 
 namespace SecondBrain.Infrastructure.Eval;
 
 public sealed record EvalLlmSelection(
-    [property: JsonPropertyName("related")] string[]? Related,
-    [property: JsonPropertyName("up")] string[]? Up,
-    [property: JsonPropertyName("duplicate_of")] string? DuplicateOf,
-    [property: JsonPropertyName("action")] string? Action);
+[property: JsonPropertyName("related")] string[]? Related,
+[property: JsonPropertyName("up")] string[]? Up,
+[property: JsonPropertyName("duplicate_of")] string? DuplicateOf,
+[property: JsonPropertyName("action")] string? Action);
 
 public sealed record LinkEvalConfigReport(
-    AblationConfig Config,
-    LinkMetrics Metrics,
-    int PromptTokens,
-    string PromptHash,
-    int RejectedHallucinations);
+AblationConfig Config,
+LinkMetrics Metrics,
+int PromptTokens,
+string PromptHash,
+int RejectedHallucinations);
 
 public sealed record DedupScoreSummary(
-    int MergeCount,
-    int NewCount,
-    double? MinMergeCosine,
-    double? MaxMergeCosine,
-    double? MaxNewCosine);
+int MergeCount,
+int NewCount,
+double? MinMergeCosine,
+double? MaxMergeCosine,
+double? MaxNewCosine);
 
 public sealed record LinkEvalReport(
-    DateTimeOffset At,
-    string Model,
-    string Profile,
-    string PromptPack,
-    string PromptHash,
-    string EmbedModel,
-    bool Live,
-    int CaseCount,
-    int CorpusCount,
-    IReadOnlyList<LinkEvalConfigReport> Results,
-    IReadOnlyList<ThresholdSweepPoint> DedupSweep,
-    DedupScoreSummary? DedupStats,
-    string LastReportJsonPath,
-    string LastReportMarkdownPath);
+DateTimeOffset At,
+string Model,
+string Profile,
+string PromptPack,
+string PromptHash,
+string EmbedModel,
+bool Live,
+int CaseCount,
+int CorpusCount,
+IReadOnlyList<LinkEvalConfigReport> Results,
+IReadOnlyList<ThresholdSweepPoint> DedupSweep,
+DedupScoreSummary? DedupStats,
+string LastReportJsonPath,
+string LastReportMarkdownPath,
+string? LastTraceLogPath = null,
+string? LastTraceNdjsonPath = null);
+
+public sealed record LinkCaseTraceEntry(
+string ConfigName,
+string CaseId,
+string Input,
+LinkGold Gold,
+IReadOnlyList<string> RetrievedTop10,
+IReadOnlyList<DedupCandidate> DedupTop5,
+DedupDecision? DedupDecision,
+IReadOnlyList<string> ProposedLinks,
+IReadOnlyList<string> ProposedUpMaps,
+IReadOnlyDictionary<string, string> ResolvedMentions,
+IReadOnlyList<string> MissedMentions,
+string PredictedAction,
+string? PredictedDuplicateTarget,
+bool Arbitrated,
+IReadOnlyList<string>? ShortlistLines,
+string? LlmRawResponse,
+string? LlmParseError,
+EvalLlmSelection? LlmParsedSelection,
+IReadOnlyList<string> LlmRejectedTokens,
+IReadOnlyList<string>? LlmSecondRunLinks,
+double ElapsedMs);
 
 public sealed class LinkEvalRunner : ILinkEvalRunner
 {
@@ -112,6 +138,18 @@ public sealed class LinkEvalRunner : ILinkEvalRunner
         Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
     };
 
+    private static readonly JsonSerializerOptions TraceNdjsonOptions = new()
+    {
+        WriteIndented = false,
+        Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+    };
+
+    private static readonly HashSet<string> RussianCaseEndings = new(StringComparer.Ordinal)
+    {
+        "", "а", "я", "у", "ю", "ом", "ем", "ём", "ой", "ей", "ою", "ею",
+        "е", "и", "ы", "ь", "ов", "ев", "ам", "ям", "ами", "ями", "ах", "ях"
+    };
+
     public static IReadOnlyList<AblationConfig> StandardAblationConfigs { get; } =
     [
         new AblationConfig("L", Lexical: true, Vector: false, Graph: false, Llm: false, ChunkTextVariant: "title_header", CosineThreshold: 0.92, MarginDelta: 0.03),
@@ -146,6 +184,8 @@ public sealed class LinkEvalRunner : ILinkEvalRunner
 
     public string? LastReportJsonPath { get; private set; }
     public string? LastReportMarkdownPath { get; private set; }
+    public string? LastTraceLogPath { get; private set; }
+    public string? LastTraceNdjsonPath { get; private set; }
     public LinkEvalReport? LastReport { get; private set; }
 
     public async Task<IReadOnlyList<AblationResult>> RunAsync(
@@ -176,6 +216,7 @@ public sealed class LinkEvalRunner : ILinkEvalRunner
         var dedupCache = new Dictionary<(string Variant, string CaseId), IReadOnlyList<DedupCandidate>>();
         var configReports = new List<LinkEvalConfigReport>(configs.Count);
         var ablationResults = new List<AblationResult>(configs.Count);
+        var traceEntries = new List<LinkCaseTraceEntry>(cases.Count * configs.Count);
         string? sweepVariant = null;
         double sweepMarginDelta = 0.03;
 
@@ -273,10 +314,17 @@ public sealed class LinkEvalRunner : ILinkEvalRunner
                     IReadOnlyList<string> proposedLinks;
                     IReadOnlyList<string> proposedUpMaps;
                     IReadOnlyList<string>? secondRunProposedLinks = null;
+                    IReadOnlyList<string>? shortlistLines = null;
+                    string? llmRawResponse = null;
+                    string? llmParseError = null;
+                    EvalLlmSelection? llmParsedSelection = null;
+                    IReadOnlyList<string> llmRejectedTokens = Array.Empty<string>();
 
                     if (canUseLlm)
                     {
                         List<ShortlistCandidate> shortlist = BuildShortlist(searchResult.Hits, corpusByPath, cfg.Graph);
+                        shortlistLines = shortlist.Select(FormatShortlistLine).ToList();
+
                         if (shortlist.Count > 0)
                         {
                             IChatClient chatClient = _chatRouter!.Resolve("extract");
@@ -299,6 +347,10 @@ public sealed class LinkEvalRunner : ILinkEvalRunner
                             predictedAction = primary.PredictedAction;
                             predictedDuplicateTarget = primary.PredictedDuplicateTarget;
                             arbitrated = primary.Arbitrated;
+                            llmRawResponse = primary.RawResponse;
+                            llmParseError = primary.ParseError;
+                            llmParsedSelection = primary.ParsedSelection;
+                            llmRejectedTokens = primary.RejectedTokens;
                             totalPromptTokens += EstimateTokens(LlmSystemPrompt) + EstimateTokens(userPrompt) + EstimateTokens(LlmJsonSchema);
                             totalRejectedHallucinations += primary.RejectedHallucinations;
 
@@ -348,6 +400,8 @@ public sealed class LinkEvalRunner : ILinkEvalRunner
 
                     sw.Stop();
 
+                    List<string> missedMentions = FindMissedMentions(evalCase.Gold.Mentions, resolvedMentions);
+
                     caseEvaluations.Add(new LinkCaseEvaluation(
                         CaseId: evalCase.Id,
                         Gold: evalCase.Gold,
@@ -360,6 +414,29 @@ public sealed class LinkEvalRunner : ILinkEvalRunner
                         OutOfCandidateCount: 0,
                         SecondRunProposedLinks: secondRunProposedLinks,
                         Arbitrated: arbitrated,
+                        ElapsedMs: sw.Elapsed.TotalMilliseconds));
+
+                    traceEntries.Add(new LinkCaseTraceEntry(
+                        ConfigName: cfg.Name,
+                        CaseId: evalCase.Id,
+                        Input: evalCase.Input,
+                        Gold: evalCase.Gold,
+                        RetrievedTop10: retrievedTop10,
+                        DedupTop5: dedupCandidates.Take(5).ToList(),
+                        DedupDecision: dedupDecision,
+                        ProposedLinks: proposedLinks,
+                        ProposedUpMaps: proposedUpMaps,
+                        ResolvedMentions: resolvedMentions,
+                        MissedMentions: missedMentions,
+                        PredictedAction: predictedAction,
+                        PredictedDuplicateTarget: predictedDuplicateTarget,
+                        Arbitrated: arbitrated,
+                        ShortlistLines: shortlistLines,
+                        LlmRawResponse: llmRawResponse,
+                        LlmParseError: llmParseError,
+                        LlmParsedSelection: llmParsedSelection,
+                        LlmRejectedTokens: llmRejectedTokens,
+                        LlmSecondRunLinks: secondRunProposedLinks,
                         ElapsedMs: sw.Elapsed.TotalMilliseconds));
                 }
 
@@ -442,7 +519,7 @@ public sealed class LinkEvalRunner : ILinkEvalRunner
             }
 
             DateTimeOffset now = _timeProvider.GetUtcNow();
-            (string jsonPath, string mdPath) = ResolveUniqueReportPaths(now);
+            (string jsonPath, string mdPath, string traceLogPath, string traceNdjsonPath) = ResolveUniqueReportPaths(now);
 
             string chatModel = ResolveChatModelName(_chatRouter);
             string chatProfile = _chatRouter is null ? "offline" : "extract";
@@ -462,16 +539,24 @@ public sealed class LinkEvalRunner : ILinkEvalRunner
                 DedupSweep: dedupSweep,
                 DedupStats: dedupStats,
                 LastReportJsonPath: jsonPath,
-                LastReportMarkdownPath: mdPath);
+                LastReportMarkdownPath: mdPath,
+                LastTraceLogPath: traceLogPath,
+                LastTraceNdjsonPath: traceNdjsonPath);
 
             string jsonContent = JsonSerializer.Serialize(report, ReportJsonOptions);
             string mdContent = FormatReportMarkdown(report);
+            string traceLogContent = FormatTraceLog(report, traceEntries);
+            string traceNdjsonContent = FormatTraceNdjson(traceEntries);
 
             await AtomicWriter.WriteAllTextAtomicAsync(jsonPath, jsonContent, ct).ConfigureAwait(false);
             await AtomicWriter.WriteAllTextAtomicAsync(mdPath, mdContent, ct).ConfigureAwait(false);
+            await AtomicWriter.WriteAllTextAtomicAsync(traceLogPath, traceLogContent, ct).ConfigureAwait(false);
+            await AtomicWriter.WriteAllTextAtomicAsync(traceNdjsonPath, traceNdjsonContent, ct).ConfigureAwait(false);
 
             LastReportJsonPath = jsonPath;
             LastReportMarkdownPath = mdPath;
+            LastTraceLogPath = traceLogPath;
+            LastTraceNdjsonPath = traceNdjsonPath;
             LastReport = report;
 
             return ablationResults;
@@ -600,6 +685,16 @@ public sealed class LinkEvalRunner : ILinkEvalRunner
         sb.AppendLine(string.Create(CultureInfo.InvariantCulture, $"- Cases: {report.CaseCount}, Corpus: {report.CorpusCount}"));
         sb.AppendLine($"- LastReportJsonPath: {report.LastReportJsonPath}");
         sb.AppendLine($"- LastReportMarkdownPath: {report.LastReportMarkdownPath}");
+        if (!string.IsNullOrWhiteSpace(report.LastTraceLogPath))
+        {
+            sb.AppendLine($"- LastTraceLogPath: {report.LastTraceLogPath}");
+        }
+
+        if (!string.IsNullOrWhiteSpace(report.LastTraceNdjsonPath))
+        {
+            sb.AppendLine($"- LastTraceNdjsonPath: {report.LastTraceNdjsonPath}");
+        }
+
         sb.AppendLine();
         sb.AppendLine("## Results");
         sb.AppendLine();
@@ -653,7 +748,179 @@ public sealed class LinkEvalRunner : ILinkEvalRunner
         return Convert.ToHexString(bytes).ToLowerInvariant();
     }
 
-    private (string JsonPath, string MdPath) ResolveUniqueReportPaths(DateTimeOffset now)
+    private static string FormatTraceLog(LinkEvalReport report, IReadOnlyList<LinkCaseTraceEntry> entries)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine("========================================================================");
+        sb.AppendLine(string.Create(CultureInfo.InvariantCulture, $"LinkEval Trace Log @ {report.At:O}"));
+        sb.AppendLine($"Model={report.Model} | EmbedModel={report.EmbedModel} | PromptPack={report.PromptPack} | Live={report.Live}");
+        sb.AppendLine("========================================================================");
+        sb.AppendLine();
+
+        string? currentConfig = null;
+        foreach (LinkCaseTraceEntry entry in entries)
+        {
+            if (!string.Equals(currentConfig, entry.ConfigName, StringComparison.Ordinal))
+            {
+                currentConfig = entry.ConfigName;
+                sb.AppendLine($"#################### CONFIG: {currentConfig} ####################");
+                sb.AppendLine();
+            }
+
+            bool isFalseMerge = string.Equals(entry.PredictedAction, "merge", StringComparison.OrdinalIgnoreCase) &&
+                (string.IsNullOrEmpty(entry.Gold.DuplicateOf) ||
+                 !string.Equals(entry.PredictedDuplicateTarget, entry.Gold.DuplicateOf, StringComparison.Ordinal));
+            bool isFalseSplit = !string.IsNullOrEmpty(entry.Gold.DuplicateOf) &&
+                string.Equals(entry.PredictedAction, "new", StringComparison.OrdinalIgnoreCase);
+
+            sb.AppendLine(string.Create(
+                CultureInfo.InvariantCulture,
+                $"[{entry.ConfigName}] Case: {entry.CaseId} | ElapsedMs={entry.ElapsedMs:0.00} | GoldAction={entry.Gold.Action} | PredAction={entry.PredictedAction} | PredDup={entry.PredictedDuplicateTarget ?? "null"} | Arbitrated={entry.Arbitrated} | FalseMerge={isFalseMerge} | FalseSplit={isFalseSplit}"));
+            sb.AppendLine($"  Input: {entry.Input}");
+            sb.AppendLine($"  Gold.Related: [{string.Join(", ", entry.Gold.Related)}]");
+            sb.AppendLine($"  Gold.Up: [{string.Join(", ", entry.Gold.Up)}]");
+            sb.AppendLine($"  Gold.HardNegatives: [{string.Join(", ", entry.Gold.HardNegatives)}]");
+            sb.AppendLine($"  Gold.DuplicateOf: {entry.Gold.DuplicateOf ?? "null"}");
+
+            var relSet = new HashSet<string>(entry.Gold.Related, StringComparer.Ordinal);
+            var upSet = new HashSet<string>(entry.Gold.Up, StringComparer.Ordinal);
+            var hnSet = new HashSet<string>(entry.Gold.HardNegatives, StringComparer.Ordinal);
+
+            sb.AppendLine("  RetrievedTop10:");
+            for (int i = 0; i < entry.RetrievedTop10.Count; i++)
+            {
+                string path = entry.RetrievedTop10[i];
+                var markers = new List<string>(4);
+                if (relSet.Contains(path))
+                {
+                    markers.Add("GOLD_REL");
+                }
+
+                if (upSet.Contains(path))
+                {
+                    markers.Add("GOLD_UP");
+                }
+
+                if (hnSet.Contains(path))
+                {
+                    markers.Add("HARD_NEG");
+                }
+
+                if (string.Equals(entry.Gold.DuplicateOf, path, StringComparison.Ordinal))
+                {
+                    markers.Add("GOLD_DUP");
+                }
+
+                string tag = markers.Count > 0 ? $" [{string.Join(",", markers)}]" : string.Empty;
+                sb.AppendLine(string.Create(CultureInfo.InvariantCulture, $"    {i + 1}. {path}{tag}"));
+            }
+
+            if (entry.DedupTop5.Count > 0)
+            {
+                string dedupStr = string.Join(
+                    ", ",
+                    entry.DedupTop5.Select(static d => string.Create(CultureInfo.InvariantCulture, $"{d.Path}={d.CosineScore:0.000}")));
+                sb.AppendLine($"  DedupTop5: {dedupStr}");
+                if (entry.DedupDecision is { } dd)
+                {
+                    sb.AppendLine(string.Create(
+                        CultureInfo.InvariantCulture,
+                        $"  DedupDecision: {dd.Kind} | TopScore={dd.TopScore:0.000} | Margin={dd.Margin:0.000} | Target={dd.TargetPath ?? "null"}"));
+                }
+            }
+
+            sb.AppendLine($"  ProposedLinks: [{string.Join(", ", entry.ProposedLinks)}]");
+            sb.AppendLine($"  ProposedUpMaps: [{string.Join(", ", entry.ProposedUpMaps)}]");
+
+            if (entry.Gold.Mentions.Count > 0)
+            {
+                string resolvedStr = string.Join(", ", entry.ResolvedMentions.Select(kvp => $"{kvp.Key}=>{kvp.Value}"));
+                sb.AppendLine($"  ResolvedMentions: {{{resolvedStr}}}");
+                if (entry.MissedMentions.Count > 0)
+                {
+                    sb.AppendLine($"  MISSED_MENTIONS: [{string.Join(", ", entry.MissedMentions)}]");
+                }
+            }
+
+            if (entry.ShortlistLines is not null)
+            {
+                sb.AppendLine("  LLM Shortlist:");
+                foreach (string line in entry.ShortlistLines)
+                {
+                    sb.AppendLine($"    {line}");
+                }
+
+                sb.AppendLine($"  LLM RawResponse: {entry.LlmRawResponse ?? "<null>"}");
+                if (!string.IsNullOrWhiteSpace(entry.LlmParseError))
+                {
+                    sb.AppendLine($"  LLM ParseError: {entry.LlmParseError}");
+                }
+
+                sb.AppendLine(entry.LlmParsedSelection is not null
+                    ? $"  LLM ParsedSelection: {JsonSerializer.Serialize(entry.LlmParsedSelection, TraceNdjsonOptions)}"
+                    : "  LLM ParsedSelection: <null>");
+
+                if (entry.LlmRejectedTokens.Count > 0)
+                {
+                    sb.AppendLine($"  LLM RejectedOutOfCandidateTokens: [{string.Join(", ", entry.LlmRejectedTokens)}]");
+                }
+
+                if (entry.LlmSecondRunLinks is not null)
+                {
+                    sb.AppendLine($"  LLM SecondRunProposedLinks: [{string.Join(", ", entry.LlmSecondRunLinks)}]");
+                }
+            }
+
+            sb.AppendLine();
+        }
+
+        return sb.ToString();
+    }
+
+    private static string FormatTraceNdjson(IReadOnlyList<LinkCaseTraceEntry> entries)
+    {
+        var sb = new StringBuilder();
+        foreach (LinkCaseTraceEntry entry in entries)
+        {
+            sb.AppendLine(JsonSerializer.Serialize(entry, TraceNdjsonOptions));
+        }
+
+        return sb.ToString();
+    }
+
+    private static List<string> FindMissedMentions(
+        IReadOnlyDictionary<string, string> goldMentions,
+        IReadOnlyDictionary<string, string> resolvedMentions)
+    {
+        var missed = new List<string>();
+        foreach (KeyValuePair<string, string> kvp in goldMentions)
+        {
+            bool matched = resolvedMentions.TryGetValue(kvp.Key, out string? exactPath) &&
+                string.Equals(exactPath, kvp.Value, StringComparison.Ordinal);
+
+            if (!matched)
+            {
+                foreach (KeyValuePair<string, string> resolved in resolvedMentions)
+                {
+                    if (string.Equals(resolved.Key, kvp.Key, StringComparison.OrdinalIgnoreCase) &&
+                        string.Equals(resolved.Value, kvp.Value, StringComparison.Ordinal))
+                    {
+                        matched = true;
+                        break;
+                    }
+                }
+            }
+
+            if (!matched)
+            {
+                missed.Add($"{kvp.Key}=>{kvp.Value}");
+            }
+        }
+
+        return missed;
+    }
+
+    private (string JsonPath, string MdPath, string TraceLogPath, string TraceNdjsonPath) ResolveUniqueReportPaths(DateTimeOffset now)
     {
         string evalDir = Path.Combine(_vaultRoot, ".brain", "eval");
         Directory.CreateDirectory(evalDir);
@@ -661,16 +928,20 @@ public sealed class LinkEvalRunner : ILinkEvalRunner
         string stamp = now.ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture);
         string jsonPath = Path.Combine(evalDir, $"{stamp}.json");
         string mdPath = Path.Combine(evalDir, $"{stamp}.md");
+        string traceLogPath = Path.Combine(evalDir, $"{stamp}.trace.log");
+        string traceNdjsonPath = Path.Combine(evalDir, $"{stamp}.trace.ndjson");
 
         int suffix = 1;
-        while (File.Exists(jsonPath) || File.Exists(mdPath))
+        while (File.Exists(jsonPath) || File.Exists(mdPath) || File.Exists(traceLogPath) || File.Exists(traceNdjsonPath))
         {
             jsonPath = Path.Combine(evalDir, $"{stamp}-{suffix}.json");
             mdPath = Path.Combine(evalDir, $"{stamp}-{suffix}.md");
+            traceLogPath = Path.Combine(evalDir, $"{stamp}-{suffix}.trace.log");
+            traceNdjsonPath = Path.Combine(evalDir, $"{stamp}-{suffix}.trace.ndjson");
             suffix++;
         }
 
-        return (jsonPath, mdPath);
+        return (jsonPath, mdPath, traceLogPath, traceNdjsonPath);
     }
 
     private async Task<VariantIndexContext> CreateAndIndexVariantAsync(
@@ -955,7 +1226,24 @@ public sealed class LinkEvalRunner : ILinkEvalRunner
             LlmJsonSchema,
             ct).ConfigureAwait(false);
 
-        int rejectedHallucinations = 0;
+        string? rawResponse = null;
+        string? parseError = null;
+        if (chatClient is OllamaChatClient ollamaClient)
+        {
+            rawResponse = ollamaClient.LastRawResponse;
+            parseError = ollamaClient.LastParseError;
+        }
+        else if (selection is not null)
+        {
+            rawResponse = JsonSerializer.Serialize(selection, TraceNdjsonOptions);
+        }
+
+        if (selection is null && string.IsNullOrWhiteSpace(parseError))
+        {
+            parseError = "ExtractAsync returned null.";
+        }
+
+        var rejectedTokens = new List<string>();
         string predictedAction = baselineAction;
         string? predictedDuplicateTarget = baselineDuplicateTarget;
         bool arbitrated = false;
@@ -970,7 +1258,7 @@ public sealed class LinkEvalRunner : ILinkEvalRunner
                     labelToCandidate,
                     pathToCandidate,
                     out ShortlistCandidate? dupCand,
-                    ref rejectedHallucinations))
+                    rejectedTokens))
             {
                 predictedAction = "merge";
                 predictedDuplicateTarget = dupCand!.Path;
@@ -992,7 +1280,7 @@ public sealed class LinkEvalRunner : ILinkEvalRunner
                     labelToCandidate,
                     pathToCandidate,
                     out ShortlistCandidate? dupCand,
-                    ref rejectedHallucinations) &&
+                    rejectedTokens) &&
                 !dupCand!.IsMap &&
                 dedupScoreByPath.TryGetValue(dupCand.Path, out double candCos) &&
                 candCos >= LlmGreyZoneCosineFloor)
@@ -1009,7 +1297,7 @@ public sealed class LinkEvalRunner : ILinkEvalRunner
                 labelToCandidate,
                 pathToCandidate,
                 out _,
-                ref rejectedHallucinations);
+                rejectedTokens);
         }
 
         var proposedLinks = new List<string>(5);
@@ -1021,7 +1309,7 @@ public sealed class LinkEvalRunner : ILinkEvalRunner
         {
             foreach (string rawUp in selection.Up)
             {
-                if (TryResolveShortlistTarget(rawUp, labelToCandidate, pathToCandidate, out ShortlistCandidate? cand, ref rejectedHallucinations))
+                if (TryResolveShortlistTarget(rawUp, labelToCandidate, pathToCandidate, out ShortlistCandidate? cand, rejectedTokens))
                 {
                     if (seenUp.Add(cand!.Path))
                     {
@@ -1035,7 +1323,7 @@ public sealed class LinkEvalRunner : ILinkEvalRunner
         {
             foreach (string rawRelated in selection.Related)
             {
-                if (TryResolveShortlistTarget(rawRelated, labelToCandidate, pathToCandidate, out ShortlistCandidate? cand, ref rejectedHallucinations))
+                if (TryResolveShortlistTarget(rawRelated, labelToCandidate, pathToCandidate, out ShortlistCandidate? cand, rejectedTokens))
                 {
                     if (cand!.IsMap)
                     {
@@ -1067,7 +1355,11 @@ public sealed class LinkEvalRunner : ILinkEvalRunner
             PredictedAction: predictedAction,
             PredictedDuplicateTarget: predictedDuplicateTarget,
             Arbitrated: arbitrated,
-            RejectedHallucinations: rejectedHallucinations);
+            RejectedHallucinations: rejectedTokens.Count,
+            RawResponse: rawResponse,
+            ParseError: parseError,
+            ParsedSelection: selection,
+            RejectedTokens: rejectedTokens);
     }
 
     private static bool TryResolveShortlistTarget(
@@ -1075,7 +1367,7 @@ public sealed class LinkEvalRunner : ILinkEvalRunner
         IReadOnlyDictionary<string, ShortlistCandidate> labelToCandidate,
         IReadOnlyDictionary<string, ShortlistCandidate> pathToCandidate,
         out ShortlistCandidate? candidate,
-        ref int rejectedHallucinations)
+        List<string> rejectedTokens)
     {
         candidate = null;
         if (string.IsNullOrWhiteSpace(rawToken))
@@ -1100,7 +1392,7 @@ public sealed class LinkEvalRunner : ILinkEvalRunner
             return true;
         }
 
-        rejectedHallucinations++;
+        rejectedTokens.Add(rawToken.Trim());
         return false;
     }
 
@@ -1211,6 +1503,14 @@ public sealed class LinkEvalRunner : ILinkEvalRunner
         return shortlist;
     }
 
+    private static string FormatShortlistLine(ShortlistCandidate candidate)
+    {
+        string tagsPart = candidate.Tags.Count > 0
+            ? $" | tags: {string.Join(", ", candidate.Tags)}"
+            : string.Empty;
+        return $"[{candidate.Label}] [type:{candidate.TypeLabel}] {candidate.Title}{tagsPart} — {candidate.Snippet}";
+    }
+
     private static string BuildLlmUserPrompt(
         string inputText,
         IReadOnlyList<ShortlistCandidate> shortlist,
@@ -1224,10 +1524,7 @@ public sealed class LinkEvalRunner : ILinkEvalRunner
 
         foreach (ShortlistCandidate candidate in shortlist)
         {
-            string tagsPart = candidate.Tags.Count > 0
-                ? $" | tags: {string.Join(", ", candidate.Tags)}"
-                : string.Empty;
-            sb.AppendLine($"[{candidate.Label}] [type:{candidate.TypeLabel}] {candidate.Title}{tagsPart} — {candidate.Snippet}");
+            sb.AppendLine(FormatShortlistLine(candidate));
         }
 
         if (needsDedupArbitration)
@@ -1314,12 +1611,6 @@ public sealed class LinkEvalRunner : ILinkEvalRunner
 
         return upMaps;
     }
-
-private static readonly HashSet<string> RussianCaseEndings = new(StringComparer.Ordinal)
-    {
-        "", "а", "я", "у", "ю", "ом", "ем", "ём", "ой", "ей", "ою", "ею",
-        "е", "и", "ы", "ь", "ов", "ев", "ам", "ям", "ами", "ями", "ах", "ях"
-    };
 
     private static Dictionary<string, string> ResolveMentionsDeterministic(
         string inputText,
@@ -1463,7 +1754,7 @@ private static readonly HashSet<string> RussianCaseEndings = new(StringComparer.
         string suffix = wordLower[stemBase.Length..];
         return RussianCaseEndings.Contains(suffix);
     }
-    
+
     private static string ChooseBestTargetPath(
         CorpusAliasEntry entry,
         IReadOnlyDictionary<string, int> topRank)
@@ -1615,7 +1906,7 @@ private static readonly HashSet<string> RussianCaseEndings = new(StringComparer.
 
         return tokens;
     }
-    
+
     private static Dictionary<string, NoteDocument> BuildCorpusLookup(IReadOnlyList<NoteDocument> corpus)
     {
         var map = new Dictionary<string, NoteDocument>(corpus.Count, StringComparer.Ordinal);
@@ -1977,7 +2268,11 @@ private static readonly HashSet<string> RussianCaseEndings = new(StringComparer.
         string PredictedAction,
         string? PredictedDuplicateTarget,
         bool Arbitrated,
-        int RejectedHallucinations);
+        int RejectedHallucinations,
+        string? RawResponse,
+        string? ParseError,
+        EvalLlmSelection? ParsedSelection,
+        IReadOnlyList<string> RejectedTokens);
 
     private sealed record AliasTargetInfo(string Path, bool IsMap, int TitleTokenCount);
 

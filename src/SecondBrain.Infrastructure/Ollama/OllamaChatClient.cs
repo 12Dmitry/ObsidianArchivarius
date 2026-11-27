@@ -110,6 +110,8 @@ public sealed class OllamaChatClient : IChatClient
     }
 
     public LlmProfile Profile => _profile;
+    public string? LastRawResponse { get; private set; }
+    public string? LastParseError { get; private set; }
 
     public async Task<T?> ExtractAsync<T>(
         string systemPrompt,
@@ -120,6 +122,9 @@ public sealed class OllamaChatClient : IChatClient
         ArgumentNullException.ThrowIfNull(systemPrompt);
         ArgumentNullException.ThrowIfNull(userPrompt);
         ArgumentException.ThrowIfNullOrWhiteSpace(jsonSchema);
+
+        LastRawResponse = null;
+        LastParseError = null;
 
         JsonElement formatElement;
         using (var schemaDoc = JsonDocument.Parse(jsonSchema))
@@ -137,6 +142,7 @@ public sealed class OllamaChatClient : IChatClient
 
         if (string.IsNullOrWhiteSpace(content))
         {
+            LastParseError = "Empty assistant content.";
             return default;
         }
 
@@ -144,8 +150,9 @@ public sealed class OllamaChatClient : IChatClient
         {
             return JsonSerializer.Deserialize<T>(content, ResponseJsonOptions);
         }
-        catch (JsonException)
+        catch (JsonException ex)
         {
+            LastParseError = ex.Message;
             return default;
         }
     }
@@ -157,6 +164,9 @@ public sealed class OllamaChatClient : IChatClient
     {
         ArgumentNullException.ThrowIfNull(systemPrompt);
         ArgumentNullException.ThrowIfNull(userPrompt);
+
+        LastRawResponse = null;
+        LastParseError = null;
 
         return SendChatRequestAsync(systemPrompt, userPrompt, format: null, ct);
     }
@@ -231,6 +241,7 @@ public sealed class OllamaChatClient : IChatClient
                 throw new InvalidOperationException("Ollama /api/chat response did not contain message.content.");
             }
 
+            LastRawResponse = chatResponse.Message.Content;
             return chatResponse.Message.Content;
         }
     }
@@ -264,9 +275,9 @@ public sealed class OllamaChatClient : IChatClient
 
 internal static class OllamaEndpointHelper
 {
-    public static Uri ResolveBaseUri(HttpClient httpClient, OllamaOptions? options)
-    {
-        ArgumentNullException.ThrowIfNull(httpClient);
+public static Uri ResolveBaseUri(HttpClient httpClient, OllamaOptions? options)
+{
+ArgumentNullException.ThrowIfNull(httpClient);
 
         string rawBaseUrl;
         if (options is not null)

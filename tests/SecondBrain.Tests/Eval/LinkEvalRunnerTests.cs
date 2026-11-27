@@ -16,12 +16,14 @@ using SecondBrain.Core.Ports;
 using SecondBrain.Infrastructure.Eval;
 using SecondBrain.Infrastructure.Vault;
 using Xunit;
+using Xunit.Abstractions;
 
 namespace SecondBrain.Tests.Eval;
 
-public sealed class LinkEvalRunnerTests
+public sealed class LinkEvalRunnerTests(ITestOutputHelper output)
 {
-    private static readonly DateTimeOffset BaseNow = new(2026, 11, 24, 10, 0, 0, TimeSpan.Zero);
+private static readonly DateTimeOffset BaseNow = new(2026, 11, 24, 10, 0, 0, TimeSpan.Zero);
+private readonly ITestOutputHelper _output = output;
 
     [Fact]
     public async Task RunAsync_RunsFiveAblationConfigs_ReusesVectors_RejectsOutOfCandidateLinks_AndWritesReports()
@@ -66,6 +68,10 @@ public sealed class LinkEvalRunnerTests
             live: false,
             ct: CancellationToken.None);
 
+        await PersistTestTraceAsync(
+            runner,
+            nameof(RunAsync_RunsFiveAblationConfigs_ReusesVectors_RejectsOutOfCandidateLinks_AndWritesReports));
+
         results.Should().HaveCount(5);
         results.Select(r => r.Config.Name).Should().ContainInOrder("L", "V", "H", "H+G", "H+G+LLM");
 
@@ -102,15 +108,21 @@ public sealed class LinkEvalRunnerTests
         capturedUserPrompts.Should().NotBeEmpty();
         capturedUserPrompts.Should().Contain(p => p.Contains("[type:map]", StringComparison.Ordinal));
 
-        // Reports persisted atomically under .brain/eval/*.json and *.md.
+        // Reports and detailed trace logs persisted atomically under .brain/eval/.
         runner.LastReportJsonPath.Should().NotBeNullOrWhiteSpace();
         runner.LastReportMarkdownPath.Should().NotBeNullOrWhiteSpace();
+        runner.LastTraceLogPath.Should().NotBeNullOrWhiteSpace();
+        runner.LastTraceNdjsonPath.Should().NotBeNullOrWhiteSpace();
         File.Exists(runner.LastReportJsonPath!).Should().BeTrue();
         File.Exists(runner.LastReportMarkdownPath!).Should().BeTrue();
+        File.Exists(runner.LastTraceLogPath!).Should().BeTrue();
+        File.Exists(runner.LastTraceNdjsonPath!).Should().BeTrue();
 
         string evalDir = Path.Combine(tempVault.Path, ".brain", "eval");
         Directory.GetFiles(evalDir, "*.json").Should().ContainSingle();
         Directory.GetFiles(evalDir, "*.md").Should().ContainSingle();
+        Directory.GetFiles(evalDir, "*.trace.log").Should().ContainSingle();
+        Directory.GetFiles(evalDir, "*.trace.ndjson").Should().ContainSingle();
 
         string jsonText = await File.ReadAllTextAsync(runner.LastReportJsonPath!);
         LinkEvalReport? report = JsonSerializer.Deserialize<LinkEvalReport>(
@@ -133,6 +145,11 @@ public sealed class LinkEvalRunnerTests
         mdText.Should().Contain(report.PromptHash);
         mdText.Should().Contain("## DedupSweep");
         mdText.Should().Contain("| 0.92 |");
+
+        string traceLogText = await File.ReadAllTextAsync(runner.LastTraceLogPath!);
+        traceLogText.Should().Contain("CONFIG: H+G+LLM");
+        traceLogText.Should().Contain("LLM RawResponse:");
+        traceLogText.Should().Contain("LLM RejectedOutOfCandidateTokens: [C99");
     }
 
     [Fact]
@@ -237,6 +254,10 @@ public sealed class LinkEvalRunnerTests
             [LinkEvalRunner.StandardAblationConfigs[0]],
             live: false);
 
+        await PersistTestTraceAsync(
+            runner,
+            nameof(RunAsync_ResolvesInflectedPersonAndTechnicalSubAliasMentions));
+
         results.Should().ContainSingle();
         results[0].Metrics.MentionAccuracy.Should().Be(1.0);
     }
@@ -320,6 +341,10 @@ public sealed class LinkEvalRunnerTests
             [LinkEvalRunner.StandardAblationConfigs[3], LinkEvalRunner.StandardAblationConfigs[4]],
             live: false);
 
+        await PersistTestTraceAsync(
+            runner,
+            nameof(RunAsync_GreyZoneMerge_AllowsLlmToResolveParaphraseDuplicate));
+
         results.Should().HaveCount(2);
         AblationResult hg = results[0];
         AblationResult hgLlm = results[1];
@@ -355,6 +380,7 @@ public sealed class LinkEvalRunnerTests
         string reportB = runnerB.LastReportJsonPath!;
 
         string comparison = await runnerB.CompareAsync(reportA, reportB);
+        _output.WriteLine(comparison);
 
         comparison.Should().Contain("# LinkEval Comparison");
         comparison.Should().Contain("| Config | Metric | Report A | Report B | Delta (B - A) |");
@@ -459,6 +485,57 @@ public sealed class LinkEvalRunnerTests
         cmpOut.Should().Contain("# LinkEval Comparison");
         cmpOut.Should().Contain("RecallAt10");
         cmpOut.Should().Contain("OutOfCandidateLinks");
+
+        await PersistCliEvalLogsAsync(evalDir, nameof(CliApp_EvalOfflineAndCompareCommands_SucceedWithTempVault));
+    }
+
+    private async Task PersistTestTraceAsync(LinkEvalRunner runner, string testName)
+    {
+        string testLogsDir = Path.Combine(AppContext.BaseDirectory, "TestLogs");
+        Directory.CreateDirectory(testLogsDir);
+
+        if (!string.IsNullOrWhiteSpace(runner.LastTraceLogPath) && File.Exists(runner.LastTraceLogPath))
+        {
+            string logContent = await File.ReadAllTextAsync(runner.LastTraceLogPath);
+            string targetLog = Path.Combine(testLogsDir, $"{testName}.trace.log");
+            await AtomicWriter.WriteAllTextAtomicAsync(targetLog, logContent);
+            _output.WriteLine($"Saved trace log: {targetLog}");
+            _output.WriteLine(logContent);
+        }
+
+        if (!string.IsNullOrWhiteSpace(runner.LastTraceNdjsonPath) && File.Exists(runner.LastTraceNdjsonPath))
+        {
+            string ndjsonContent = await File.ReadAllTextAsync(runner.LastTraceNdjsonPath);
+            string targetNdjson = Path.Combine(testLogsDir, $"{testName}.trace.ndjson");
+            await AtomicWriter.WriteAllTextAtomicAsync(targetNdjson, ndjsonContent);
+            _output.WriteLine($"Saved trace ndjson: {targetNdjson}");
+        }
+
+        if (!string.IsNullOrWhiteSpace(runner.LastReportMarkdownPath) && File.Exists(runner.LastReportMarkdownPath))
+        {
+            string mdContent = await File.ReadAllTextAsync(runner.LastReportMarkdownPath);
+            string targetMd = Path.Combine(testLogsDir, $"{testName}.report.md");
+            await AtomicWriter.WriteAllTextAtomicAsync(targetMd, mdContent);
+        }
+    }
+
+    private async Task PersistCliEvalLogsAsync(string evalDir, string testName)
+    {
+        string testLogsDir = Path.Combine(AppContext.BaseDirectory, "TestLogs");
+        Directory.CreateDirectory(testLogsDir);
+
+        string? latestTrace = Directory.GetFiles(evalDir, "*.trace.log")
+            .OrderByDescending(static p => p, StringComparer.Ordinal)
+            .FirstOrDefault();
+
+        if (latestTrace is not null)
+        {
+            string content = await File.ReadAllTextAsync(latestTrace);
+            string targetLog = Path.Combine(testLogsDir, $"{testName}.trace.log");
+            await AtomicWriter.WriteAllTextAtomicAsync(targetLog, content);
+            _output.WriteLine($"Saved CLI trace log: {targetLog}");
+            _output.WriteLine(content);
+        }
     }
 
     private static IReadOnlyList<NoteDocument> BuildSyntheticCorpus()
